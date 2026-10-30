@@ -1,0 +1,16 @@
+# environments
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# tools
+.pytest_cache/
+.ruff_cache/
+
+# recordings, downloads and generated output
+data/
