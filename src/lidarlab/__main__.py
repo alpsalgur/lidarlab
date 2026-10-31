@@ -1,5 +1,5 @@
 import sys
 
-from lidarlab.app.main import main
+from lidarlab.cli import main
 
 sys.exit(main())

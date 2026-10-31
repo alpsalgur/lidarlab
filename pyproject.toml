@@ -26,8 +26,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
 
-[project.gui-scripts]
-lidarlab = "lidarlab.app.main:main"
+[project.scripts]
+lidarlab = "lidarlab.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lidarlab"]
