@@ -7,13 +7,21 @@ from functools import lru_cache
 import numpy as np
 import pyvista as pv
 from matplotlib import colormaps
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 from pyvistaqt import QtInteractor
 from vtkmodules.util import numpy_support
 from vtkmodules.vtkCommonCore import vtkLookupTable, vtkPoints, vtkVariant
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.vtkRenderingAnnotation import vtkScalarBarActor
-from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer, vtkTextActor
+from vtkmodules.vtkRenderingCore import (
+    vtkActor,
+    vtkActor2D,
+    vtkCoordinate,
+    vtkPolyDataMapper,
+    vtkPolyDataMapper2D,
+    vtkRenderer,
+    vtkTextActor,
+)
 
 ECHO_COLORS = ("#ff9f1c", "#d9d9d9", "#4dabf7", "#69db7c", "#da77f2", "#ffd43b")
 # ground-truth classes; the synthetic run's 0-6 are cover, ground, object, edge, vegetation,
@@ -37,6 +45,9 @@ CAMERAS = {
 RING_RADII = (10, 20, 30, 40, 50, 60, 80, 100)
 EGO_SIZE = (4.7, 1.9, 1.5)  # length, width, height of the car outline, m
 LEGEND_BACKGROUND = (0.07, 0.08, 0.1)
+TOOLS = ("navigate", "pick", "measure", "select")
+CLICK_SLOP = 3  # px a click may move and still count as a click, not a drag
+MEASURE_COLOR = "#ffd54f"
 
 
 def _plain_text(prop, size: int) -> None:
@@ -176,11 +187,33 @@ def ring_mesh(z: float, segments: int = 240) -> pv.PolyData:
 
 
 class RenderView(QtWidgets.QWidget):
-    """The 3D view: the point cloud, named point layers, color legend and scene helpers."""
+    """The 3D view: the point cloud, named point layers, color legend and scene helpers.
+
+    With a tool other than "navigate", clicks and boxes come out as signals (VTK display
+    pixels): in "pick" and "measure" a click picks and a drag still turns the camera, in
+    "select" a drag draws a box instead.
+    """
+
+    pointClicked = QtCore.Signal(object, float, float)  # renderer, x, y
+    boxDrawn = QtCore.Signal(object, object)  # renderer, (x0, y0, x1, y1) or None for a click
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.plotter = QtInteractor(self, auto_update=False, multi_samples=4)
+        self.tool = "navigate"
+        self._press: tuple | None = None
+        self._click: QtCore.QPointF | None = None
+        self._band: tuple | None = None  # rubber band actor, its points and renderer
+        self._observers: dict[str, int] = {}
+        self._iren = self.plotter.render_window.GetInteractor()
+        for event, handler in (("LeftButtonPressEvent", self._on_press),
+                               ("MouseMoveEvent", self._on_move),
+                               ("LeftButtonReleaseEvent", self._on_release)):
+            # before the camera's interactor style, so a box drag can stop it turning
+            self._observers[event] = self._iren.AddObserver(event, handler, 2.0)
+        # clicks for pick/measure come from Qt: once the camera style has the mouse, VTK
+        # passes the button release only to the style
+        self.plotter.interactor.installEventFilter(self)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.plotter.interactor)
@@ -206,6 +239,122 @@ class RenderView(QtWidgets.QWidget):
     def owns(self, obj) -> bool:
         """True for the VTK widget and its children (their key events are filtered)."""
         return isinstance(obj, QtWidgets.QWidget) and (obj is self or self.isAncestorOf(obj))
+
+    # tools
+
+    def set_tool(self, tool: str) -> None:
+        if tool not in TOOLS:
+            raise ValueError(f"tool must be one of {', '.join(TOOLS)}")
+        self.tool = tool
+        self._press = self._click = None
+        self._hide_band()
+        cursor = QtCore.Qt.CursorShape.ArrowCursor if tool == "navigate" else \
+            QtCore.Qt.CursorShape.CrossCursor
+        self.plotter.interactor.setCursor(cursor)
+
+    def _stop(self, iren, event: str) -> None:
+        iren.GetCommand(self._observers[event]).SetAbortFlag(1)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Pick and measure: a left click (press and release without moving) picks; a drag
+        still turns the camera."""
+        if self.tool not in ("pick", "measure"):
+            return False
+        kind = event.type()
+        left = getattr(event, "button", lambda: None)() == QtCore.Qt.MouseButton.LeftButton
+        if kind == QtCore.QEvent.Type.MouseButtonPress and left:
+            self._click = event.position()
+        elif kind == QtCore.QEvent.Type.MouseButtonRelease and left and self._click is not None:
+            start, self._click = self._click, None
+            pos = event.position()
+            if max(abs(pos.x() - start.x()), abs(pos.y() - start.y())) <= CLICK_SLOP:
+                widget = self.plotter.interactor
+                scale = widget.devicePixelRatioF()  # the same conversion VTK's Qt widget uses
+                x = round(pos.x() * scale)
+                y = round((widget.height() - pos.y() - 1) * scale)
+                renderer = self._iren.FindPokedRenderer(x, y)
+                self.pointClicked.emit(renderer, float(x), float(y))
+        return False
+
+    def _on_press(self, iren, event) -> None:
+        if self.tool != "select":
+            return
+        x, y = iren.GetEventPosition()
+        renderer = iren.FindPokedRenderer(x, y)
+        self._press = (x, y, renderer)
+        self._stop(iren, event)  # no camera turn while the box is drawn
+        self._show_band(renderer, x, y, x, y)
+
+    def _on_move(self, iren, event) -> None:
+        if self.tool == "select" and self._press is not None:
+            x, y = iren.GetEventPosition()
+            self._show_band(self._press[2], self._press[0], self._press[1], x, y)
+            self._stop(iren, event)
+
+    def _on_release(self, iren, event) -> None:
+        if self.tool != "select" or self._press is None:
+            return
+        x0, y0, renderer = self._press
+        self._press = None
+        x, y = iren.GetEventPosition()
+        moved = abs(x - x0) > CLICK_SLOP or abs(y - y0) > CLICK_SLOP
+        self._stop(iren, event)
+        self._hide_band()
+        self.boxDrawn.emit(renderer, (x0, y0, x, y) if moved else None)
+
+    def _show_band(self, renderer, x0, y0, x1, y1) -> None:
+        """The selection box, drawn in display pixels over the given renderer."""
+        if self._band is None:
+            points = vtkPoints()
+            points.SetNumberOfPoints(5)
+            lines = vtkCellArray()
+            lines.InsertNextCell(5)
+            for k in range(5):
+                lines.InsertCellPoint(k)
+            poly = vtkPolyData()
+            poly.SetPoints(points)
+            poly.SetLines(lines)
+            coordinate = vtkCoordinate()
+            coordinate.SetCoordinateSystemToDisplay()
+            mapper = vtkPolyDataMapper2D()
+            mapper.SetInputData(poly)
+            mapper.SetTransformCoordinate(coordinate)
+            actor = vtkActor2D()
+            actor.SetMapper(mapper)
+            actor.GetProperty().SetColor(0.3, 0.8, 1.0)
+            actor.GetProperty().SetLineWidth(1.5)
+            self._band = (actor, points, None)
+        actor, points, current = self._band
+        if current is not renderer:
+            if current is not None:
+                current.RemoveViewProp(actor)
+            renderer.AddViewProp(actor)
+            self._band = (actor, points, renderer)
+        for k, (px, py) in enumerate(((x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0))):
+            points.SetPoint(k, px, py, 0.0)
+        points.Modified()
+        actor.SetVisibility(True)
+        self.plotter.render()
+
+    def _hide_band(self) -> None:
+        if self._band is not None and self._band[0].GetVisibility():
+            self._band[0].SetVisibility(False)
+            self.plotter.render()
+
+    def set_measurement(self, a=None, b=None, text: str = "") -> None:
+        """A line from a to b with ``text`` at its middle; no points removes it."""
+        for name in ("measure_line", "measure_label"):
+            self.plotter.remove_actor(name, render=False)
+        if a is None or b is None:
+            return
+        add = dict(render=False, reset_camera=False)
+        self.plotter.add_mesh(pv.Line(a, b), color=MEASURE_COLOR, line_width=2, lighting=False,
+                              pickable=False, name="measure_line", **add)
+        middle = (np.asarray(a) + np.asarray(b)) / 2
+        self.plotter.add_point_labels([middle], [text], font_size=13, text_color=MEASURE_COLOR,
+                                      shape_color="#1e1e1e", shape_opacity=0.75,
+                                      show_points=False, always_visible=True,
+                                      name="measure_label", **add)
 
     def _make_legend(self) -> vtkScalarBarActor:
         """Vertical color bar on the right with a dark background."""

@@ -14,7 +14,8 @@ from . import theme
 class InfoPanel(QtWidgets.QTreeWidget):
     """Sections of key/value rows, updated in place for every frame."""
 
-    SECTIONS = ("File", "Time", "Pose", "Points", "Bounds", "Arrays", "Timing")
+    SECTIONS = ("Picked point", "Measurement", "Selection", "File", "Time", "Pose", "Points",
+                "Bounds", "Arrays", "Timing")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,6 +33,7 @@ class InfoPanel(QtWidgets.QTreeWidget):
             item.setFont(0, bold)
             item.setForeground(0, QtGui.QBrush(QtGui.QColor(theme.ACCENT)))
             item.setFirstColumnSpanned(True)
+            item.setHidden(name in ("Picked point", "Measurement", "Selection"))
             self._sections[name] = item
         self.expandAll()
 
@@ -107,3 +109,53 @@ class InfoPanel(QtWidgets.QTreeWidget):
             self._set("Timing", "read file", f"{load:.1f} ms")
         for key, value in w.timing.items():
             self._set("Timing", key, f"{value:.1f} ms")
+        self._show_tools(w)
+
+    def _show_section(self, name: str, show: bool) -> None:
+        item = self._sections[name]
+        if item.isHidden() == show:
+            item.setHidden(not show)
+            item.setExpanded(show)  # sections hidden at start were not expanded with the rest
+
+    def _show_tools(self, w) -> None:
+        """Picked point, measurement and selection; each section only while it has content."""
+        picked = w.picked or {}
+        for key, value in picked.items():
+            if key == "view":
+                continue
+            text = f"{value:.4g}" if isinstance(value, float) else str(value)
+            self._set("Picked point", key, text + (" m" if key in ("x", "y", "z", "range")
+                                                   else "°" if key in ("azimuth", "elevation")
+                                                   else ""))
+        self._keep("Picked point", {k for k in picked if k != "view"})
+        self._show_section("Picked point", bool(picked))
+
+        m = w.measurement or {}
+        if m:
+            self._set("Measurement", "distance", f"{m['distance']:.3f} m")
+            self._set("Measurement", "horizontal", f"{m['horizontal']:.3f} m")
+            self._set("Measurement", "Δz", f"{m['dz']:+.3f} m")
+        self._show_section("Measurement", bool(m))
+
+        sel = w.selected
+        keys = set()
+        if sel is not None:
+            keys = {"points"}
+            self._set("Selection", "points", f"{len(sel):,}")
+            if len(sel):
+                lo, hi = sel.bounds()
+                for k, axis in enumerate("xyz"):
+                    keys.add(axis)
+                    self._set("Selection", axis, f"{lo[k]:.2f} … {hi[k]:.2f} m")
+                for name in ("intensity", "range"):
+                    values = sel[name] if name in sel or name == "range" else None
+                    if values is not None and len(values):
+                        keys.add(f"mean {name}")
+                        self._set("Selection", f"mean {name}", f"{float(np.mean(values)):.4g}")
+                if "echo" in sel.fields:
+                    e, c = np.unique(sel.echo, return_counts=True)
+                    keys.add("echoes")
+                    self._set("Selection", "echoes", ", ".join(
+                        f"{a}: {b:,}" for a, b in zip(e.tolist(), c.tolist(), strict=True)))
+        self._keep("Selection", keys)
+        self._show_section("Selection", sel is not None)
