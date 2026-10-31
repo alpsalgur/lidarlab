@@ -16,6 +16,9 @@ Layouts:
 Both carry the frame-level scalars ``roll``, ``pitch``, ``yaw`` (ego orientation, rad) and
 ``timestamp`` (POSIX s). Points are in the sensor frame: x forward, y left, z up.
 
+Every point also has a ground-truth ``label`` (see ``LABELS``), so filters can be scored:
+0 cover, 1 ground, 2 object, 3 edge background, 4 vegetation, 5 rain, 6 spray.
+
 The weather changes so that filters have something to find: the first 35 % of the frames
 are dry, then rain builds up until 60 % and stays. Rain wets the cover (more echo 0),
 adds drops close to the sensor and makes the truck ahead throw up spray.
@@ -38,6 +41,9 @@ import numpy as np
 N_ECHOES = 3
 LANE_Y = -1.75  # the ego car drives in the right lane of a road along +x
 T0 = 1_793_361_600.0  # timestamp of frame 0: 2026-10-30 12:00 UTC
+LABELS = {0: "sensor cover", 1: "ground", 2: "object", 3: "edge background", 4: "vegetation",
+          5: "rain", 6: "spray"}
+NOISE_LABELS = (0, 5, 6)  # what a denoising filter should remove
 
 
 @dataclass
@@ -273,7 +279,9 @@ def box_span(o, inv_d, lo, hi):
 
 
 def assemble_echoes(cand_range, cand_int, separation):
-    """Sort return candidates by range, merge ones closer than ``separation``, keep two."""
+    """Sort return candidates by range, merge ones closer than ``separation``, keep two.
+
+    Returns their ranges, intensities and the candidate column each one came from."""
     order = np.argsort(cand_range, axis=1)
     cand_range = np.take_along_axis(cand_range, order, axis=1)
     cand_int = np.take_along_axis(cand_int, order, axis=1)
@@ -283,8 +291,9 @@ def assemble_echoes(cand_range, cand_int, separation):
             merged = cand_range[:, j] - last < separation
             cand_range[merged, j] = np.inf
             last = np.where(np.isfinite(cand_range[:, j]), cand_range[:, j], last)
-    order = np.argsort(cand_range, axis=1)[:, :2]
-    return np.take_along_axis(cand_range, order, axis=1), np.take_along_axis(cand_int, order, 1)
+    keep = np.argsort(cand_range, axis=1)[:, :2]
+    return (np.take_along_axis(cand_range, keep, axis=1), np.take_along_axis(cand_int, keep, 1),
+            np.take_along_axis(order, keep, axis=1))
 
 
 def simulate_frame(cfg: Config, scene: Scene, dirs: np.ndarray, ring: np.ndarray,
@@ -386,10 +395,15 @@ def simulate_frame(cfg: Config, scene: Scene, dirs: np.ndarray, ring: np.ndarray
         cand_range[idx[keep], 4] = r[keep]
         cand_int[idx[keep], 4] = rng.uniform(2.0, 18.0, keep.sum())
 
-    echo_r, echo_i = assemble_echoes(cand_range, cand_int, cfg.echo_separation)
+    echo_r, echo_i, echo_src = assemble_echoes(cand_range, cand_int, cfg.echo_separation)
+    # label of each candidate column: solid (ground or object), edge, crown, rain, spray
+    cand_label = np.empty((n, 5), np.uint8)
+    cand_label[:, 0] = np.where(kind == 0, 1, 2)
+    cand_label[:, 1:] = [3, 4, 5, 6]
 
     ranges = np.full((N_ECHOES, n), np.nan, np.float32)
     inten = np.full((N_ECHOES, n), np.nan, np.float32)
+    label = np.zeros((N_ECHOES, n), np.uint8)  # 0 where there is no return
     cover = np.flatnonzero(rng.random(n) < np.minimum(cover_p + 0.25 * rain, 0.95))
     ranges[0, cover] = rng.uniform(0.04, 0.09, cover.size)
     inten[0, cover] = rng.uniform(40.0, 220.0, cover.size)
@@ -397,6 +411,7 @@ def simulate_frame(cfg: Config, scene: Scene, dirs: np.ndarray, ring: np.ndarray
         idx = np.flatnonzero(np.isfinite(echo_r[:, e - 1]))
         ranges[e, idx] = echo_r[idx, e - 1] + rng.normal(0.0, cfg.range_noise, idx.size)
         inten[e, idx] = echo_i[idx, e - 1]
+        label[e, idx] = cand_label[idx, echo_src[idx, e - 1]]
     xyz = dirs * ranges[..., None]  # (3, n, 3) in the sensor frame, NaN where no return
 
     meta = {
@@ -407,7 +422,7 @@ def simulate_frame(cfg: Config, scene: Scene, dirs: np.ndarray, ring: np.ndarray
     }
     if cfg.layout == "echo-axis":
         x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
-        return {"x": x, "y": y, "z": z, "intensity": inten, "ring": ring, **meta}
+        return {"x": x, "y": y, "z": z, "intensity": inten, "label": label, "ring": ring, **meta}
     valid = np.isfinite(inten)
     echo = np.broadcast_to(np.arange(N_ECHOES, dtype=np.uint8)[:, None], valid.shape)
     return {
@@ -415,6 +430,7 @@ def simulate_frame(cfg: Config, scene: Scene, dirs: np.ndarray, ring: np.ndarray
         "y": xyz[..., 1][valid],
         "z": xyz[..., 2][valid],
         "intensity": inten[valid],
+        "label": label[valid],
         "echo_number": echo[valid],
         "ring": np.broadcast_to(ring, valid.shape)[valid],
         **meta,
@@ -481,6 +497,8 @@ def generate(out_dir: str | Path, cfg: Config, workers: int = 1, log=_log) -> Pa
             "timestamp": "s (POSIX)",
             "intensity": "0-255",
         },
+        "labels": {str(k): v for k, v in LABELS.items()},
+        "noise_labels": list(NOISE_LABELS),
         "config": asdict(cfg),
     }
     (out / "recording.json").write_text(json.dumps(info, indent=2))

@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 
 from lidarlab.datasets import synthetic
@@ -58,3 +60,23 @@ def test_workers_give_the_same_frames(tmp_path):
         with np.load(tmp_path / "serial" / name) as a, np.load(tmp_path / "parallel" / name) as b:
             for key in a.files:
                 assert np.array_equal(a[key], b[key], equal_nan=True), (name, key)
+
+
+def test_labels_mark_cover_rain_and_spray(tmp_path):
+    synthetic.generate(tmp_path / "dry", small(rain=0.0), log=None)
+    synthetic.generate(tmp_path / "wet", small(rain=1.0), log=None)
+    with np.load(tmp_path / "dry" / "frame_000002.npz") as dry, \
+            np.load(tmp_path / "wet" / "frame_000002.npz") as wet:
+        for f in (dry, wet):
+            valid = np.isfinite(f["x"])
+            assert f["label"].shape == f["x"].shape
+            assert np.all(f["label"][0][valid[0]] == 0)  # echo 0 is the cover
+            assert np.all(f["label"][1:][valid[1:]] >= 1)
+            ground = f["label"] == 1
+            assert np.all(np.abs(f["z"][ground]) < 3.0)  # ground below a 1.9 m high sensor
+        dry_labels = set(np.unique(dry["label"][np.isfinite(dry["x"])]).tolist())
+        wet_labels = set(np.unique(wet["label"][np.isfinite(wet["x"])]).tolist())
+    assert not dry_labels & {5, 6}
+    assert {5, 6} <= wet_labels
+    info = json.loads((tmp_path / "wet" / "recording.json").read_text())
+    assert info["labels"]["5"] == "rain" and info["noise_labels"] == [0, 5, 6]
