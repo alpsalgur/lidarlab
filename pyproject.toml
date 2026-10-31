@@ -17,11 +17,17 @@ dependencies = [
     "pyvistaqt>=0.11",
     "qtconsole>=5.6",
     "ipykernel>=6.29",
+    "jedi>=0.19",
+    "matplotlib>=3.8",
+    "psutil>=5.9",
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.gui-scripts]
+lidarlab = "lidarlab.app.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lidarlab"]
@@ -35,3 +41,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# examples run inside the app's shell, where frame, view and rec are defined
+"src/lidarlab/examples/*" = ["F821"]
