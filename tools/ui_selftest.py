@@ -11,11 +11,12 @@ import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import numpy as np
-from PySide6 import QtCore, QtTest
+from PySide6 import QtCore, QtTest, QtWidgets
 
 from lidarlab.app.main import make_app
 
@@ -85,6 +86,15 @@ def main() -> int:
     # open and play
     checks["first frame shown"] = wait(lambda: w.raw is not None)
     pump(1.0)
+
+    def dock_tab_bars() -> list:
+        return [b for b in w.findChildren(QtWidgets.QTabBar)
+                if b.isVisible() and b.count() and b.parent() is w]
+
+    checks["no stray dock tab bars"] = len(dock_tab_bars()) == 2
+    w.reset_layout()
+    pump(0.5)
+    checks["reset layout leaves no stray tab bars"] = len(dock_tab_bars()) == 2
     shot("ui_01_opened.png")
     fps, stalls = play_for(6.0, 1.0)
     numbers["playback 1x"] = (f"{fps:.1f} fps (recorded {w.rec.rate_hz:.1f} Hz), "
@@ -226,9 +236,8 @@ def main() -> int:
     numbers["ring_jumps on this frame"] = f"{jumps.n_in:,} -> {jumps.n_out:,} in {jumps.ms:.0f} ms"
 
     # export: the app (in the background) and the command line write the same frames
-    gui_out, cli_out = args.out / "selftest_export_app", args.out / "selftest_export_cli"
-    for folder in (gui_out, cli_out):
-        shutil.rmtree(folder, ignore_errors=True)
+    scratch = Path(tempfile.mkdtemp(prefix="lidarlab-selftest-"))  # not a test run under data/
+    gui_out, cli_out = scratch / "app", scratch / "cli"
     job = w.start_export(gui_out, frames=range(140, 160), interactive=False)
     checks["export runs in the background"] = not job.done
     checks["export finishes"] = wait(lambda: job.done, timeout=300) and job.error is None
@@ -247,6 +256,120 @@ def main() -> int:
             same &= a.files == b.files and all(
                 np.array_equal(a[k], b[k], equal_nan=True) for k in a.files)
     checks["app and command line write the same frames"] = same
+    shutil.rmtree(scratch, ignore_errors=True)
+
+    # analysis: pick, measure, box selection, metrics, histogram, bookmarks, workspace
+    from lidarlab.app.picking import screen_view
+
+    w.api.goto(150)
+    w.set_camera("3d")
+    pump(0.3)
+    renderer = w.view.renderer
+
+    def to_qt(x, y) -> QtCore.QPoint:  # VTK display pixels -> Qt widget position
+        dpr = vtk_widget.devicePixelRatioF()
+        return QtCore.QPoint(round(x / dpr), round(vtk_widget.height() - 1 - y / dpr))
+
+    def near_center(dx: float = 0.0) -> tuple[float, float]:
+        """Display position of a drawn point near the middle of the view (shifted by dx)."""
+        sv = screen_view(renderer)
+        xy, _, visible = sv.project(w.shown.xyz)
+        x0, y0, width, height = sv.viewport
+        target = np.array([x0 + width / 2 + dx, y0 + height / 2])
+        d = np.where(visible, np.hypot(*(xy - target).T), np.inf)
+        return tuple(xy[int(np.argmin(d))])
+
+    w.set_tool("pick")
+    x, y = near_center()
+    QtTest.QTest.mouseClick(vtk_widget, QtCore.Qt.MouseButton.LeftButton, pos=to_qt(x, y))
+    picked = w.api.picked
+    ok = picked is not None
+    if ok:
+        p_xy = screen_view(renderer).project(np.array([[picked["x"], picked["y"],
+                                                        picked["z"]]]))[0][0]
+        ok = np.hypot(p_xy[0] - x, p_xy[1] - y) <= 9 and "intensity" in picked
+    checks["a click picks the point under the mouse"] = ok
+    w.set_tool("measure")
+    for dx in (0.0, 160.0):
+        x, y = near_center(dx)
+        QtTest.QTest.mouseClick(vtk_widget, QtCore.Qt.MouseButton.LeftButton, pos=to_qt(x, y))
+    m = w.api.measurement
+    checks["two clicks measure a distance"] = m is not None and m["distance"] > 0.5 and abs(
+        m["distance"] - float(np.linalg.norm(w.measure_points[1] - w.measure_points[0]))) < 1e-4
+    if m:
+        numbers["measured"] = f"{m['distance']:.2f} m (horizontal {m['horizontal']:.2f} m)"
+    w.set_tool("select")
+    cx, cy = near_center()
+    start, end = to_qt(cx - 120, cy - 70), to_qt(cx + 120, cy + 70)
+    QtTest.QTest.mousePress(vtk_widget, QtCore.Qt.MouseButton.LeftButton, pos=start)
+    for k in range(1, 11):
+        QtTest.QTest.mouseMove(vtk_widget, start + (end - start) * k / 10)
+        pump(0.01)
+    QtTest.QTest.mouseRelease(vtk_widget, QtCore.Qt.MouseButton.LeftButton, pos=end)
+    sel = w.api.selection
+    inside = sel is not None and len(sel) > 0 and bool(
+        np.all(w.selection.view.inside(sel.xyz, w.selection.rect)))
+    checks["a dragged box selects the points inside it"] = inside
+    count = len(sel) if sel is not None else 0
+    w.docks["info"].raise_()
+    shot("ui_11_selection.png")
+    w.set_camera("bev")
+    w.refresh()
+    checks["the selection stays when the camera moves"] = (w.api.selection is not None
+                                                          and len(w.api.selection) == count)
+    w.step(1)
+    pump(0.3)
+    checks["the selection follows to the next frame"] = (w.api.selection is not None
+                                                        and len(w.api.selection) > 0)
+    numbers["selection"] = f"{count:,} points on frame 150, {len(w.api.selection):,} on 151"
+    w.set_tool("navigate")
+    w.set_camera("3d")
+
+    w.compute_metrics()
+    checks["metrics computed for every frame"] = wait(
+        lambda: w.metrics_job.done and w.metrics.known("removed_pct") == len(w.rec), 180)
+    removed = w.metrics.values["removed_pct"]
+    numbers["removed by the steps"] = (f"{np.nanmin(removed):.1f}–{np.nanmax(removed):.1f} % "
+                                       f"of the points per frame")
+    checks["metrics include the selection"] = w.metrics.known("selected") == len(w.rec)
+    w.docks["inspector"].raise_()
+    w.inspector.field.setCurrentText("intensity")
+    pump(0.3)
+    hist = w.inspector.histogram
+    checks["the histogram counts every point"] = int(hist.loaded.sum()) == len(w.raw)
+
+    bookmark_file = w.rec.path / "bookmarks.json"
+    saved_bookmarks = bookmark_file.read_bytes() if bookmark_file.exists() else None
+    try:
+        w.api.bookmark("rain at its peak", frame=150)
+        w.api.bookmark("selftest", frame=60)
+        w.api.goto(100)
+        w.jump_bookmark(1)
+        checks["bookmarks are saved and jumped to"] = (
+            w.index == 150 and bookmark_file.exists()
+            and w.player_bar.seekbar.marks == [60, 150])
+        shot("ui_10_analysis.png")
+    finally:
+        if saved_bookmarks is None:
+            bookmark_file.unlink(missing_ok=True)
+        else:
+            bookmark_file.write_bytes(saved_bookmarks)
+
+    ws = args.out / "selftest_workspace.lidarlab"
+    w.set_color_by("echo")
+    w.set_camera("bev")
+    w.api.save_workspace(ws)
+    camera = w.view.renderer.GetActiveCamera()
+    before = (w.index, w.display.color_by, camera.GetPosition())
+    w.api.goto(10)
+    w.set_color_by("range")
+    w.set_camera("side")
+    restored = w.open_workspace(ws)
+    after = (w.index, w.display.color_by, camera.GetPosition())
+    checks["a workspace brings back frame, coloring and camera"] = (
+        restored and after[:2] == before[:2] and np.allclose(after[2], before[2]))
+    w.clear_tools()
+    w.set_color_by("intensity")
 
     # a second test run (other layout)
     if args.other:
