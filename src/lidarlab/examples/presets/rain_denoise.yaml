@@ -1,0 +1,30 @@
+# LidarLab pipeline preset
+# Rain and spray removal for multi-echo data (echo 0 = sensor cover): drop the cover echo,
+# then weak first echoes in front of a second echo, then isolated points with DROR.
+# Scored on the labeled synthetic city_rain run (intensity 0-255), frames 120/150/190:
+# 94-96 % of the rain and spray removed, 93-94 % of the removed points are noise,
+# 469 points removed on the dry frame 30. Example 08 prints these numbers per frame.
+lidarlab_pipeline: 1
+steps:
+- name: echo
+  enabled: true
+  filter: echo
+  params:
+    mode: drop cover echo
+    n: 1
+    cover: 0
+- name: weak_first_echo
+  enabled: true
+  filter: weak_first_echo
+  params:
+    max_intensity: 20.0
+    cover: 0
+- name: dror
+  enabled: true
+  filter: dror
+  params:
+    beta: 5.0
+    alpha_deg: 0.2
+    min_radius: 0.04
+    min_neighbors: 2
+    max_range: 80.0
