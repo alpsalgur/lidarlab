@@ -13,6 +13,9 @@ noise reduction, your own processing steps.
 - Split view: raw points on the left, the pipeline's output on the right, one camera
 - An IPython shell and a script editor running in the viewer's process: scripts see the frames
   as NumPy arrays, without copies
+- Export: run the pipeline over a whole test run (or a range) from the app, in the background,
+  or with `lidarlab run` on the command line; both write the same files (npz in the source's
+  layout, or PLY/PCD)
 - Pipeline presets in YAML, converters for KITTI, Boreas (snow) and WADS (labeled snow), and a
   synthetic multi-echo recording with rain, spray and per-point ground truth
 
@@ -30,9 +33,8 @@ venv\Scripts\python tools\smoke_test.py      # checks that Qt, VTK and the shell
 ## Running
 
 ```powershell
-.\LidarLab.bat                                    # or double-click it in Explorer
-venv\Scripts\lidarlab data\synthetic\city_rain   # start with a test run
-venv\Scripts\python -m lidarlab                  # with a console window, for debugging
+.\LidarLab.bat                                    # or double-click it in Explorer (no console)
+venv\Scripts\lidarlab data\synthetic\city_rain   # from a terminal, with a test run
 ```
 
 The app remembers the last test run and the window layout; `--reset-layout` restores the
@@ -71,6 +73,30 @@ Filters → Load Pipeline Preset → `examples/presets/rain_denoise.yaml` (cover
 echoes + DROR). On the labeled synthetic run it removes 94–96 % of the rain and spray, and
 93–94 % of the points it removes are noise.
 
+## Export
+
+File → Export Test Run (Ctrl+Shift+E) runs a copy of the current steps over all frames or a
+range and writes them to a new folder, in the background with a progress window; sliders moved
+meanwhile do not change the export. The same from a terminal, with a preset:
+
+```powershell
+venv\Scripts\lidarlab run data\synthetic\city_rain data\exports\clean -p rain_denoise.yaml
+venv\Scripts\lidarlab run data\kitti\2011_09_26_drive_0011 data\exports\kitti_ply --format ply
+venv\Scripts\lidarlab run data\boreas\boreas-2021-01-26-11-22_3300 data\exports\snow_pcd --frames 50:150 --format pcd
+```
+
+Options: `--frames A:B` (A included, B not), `--format npz|ply|pcd`, `--workers N`,
+`--processes`, `--no-compress`, `--overwrite`. The exit code is 0 when every frame was written.
+
+The output folder is a test run again: one file per source frame under the same name, npz in
+the source's layout (in echo-axis files removed points become `NaN`), plus `recording.json`
+(what was done), `pipeline.yaml` (the steps) and `export.log` (points in and out, time and error
+per frame). A frame whose steps fail is not written, so an unfiltered frame cannot slip into the
+output. PLY and PCD are binary and carry every numeric field (intensity, echo, ring, label…).
+
+On 4 cores / 8 threads, the rain preset exports a 600-frame run (~300k points per frame) in
+about 90 s (6.8 frames/s), from the app and from the command line alike, with identical files.
+
 ## Working with Python
 
 The shell and the editor share their names with the viewer: `rec` (test run), `frame` (current
@@ -97,6 +123,7 @@ pipe.add(lab.filters.DROR(beta=3))  # built-in filter;  pipe["dror"].set(min_nei
 pipe.save("denoise.yaml")           # preset: steps, order, values
 view.split()                        # raw | after the pipeline
 view.output.save("out.npz")         # the frame after the steps, in the source layout
+job = view.export("data/exports/clean", frames=range(100, 200))   # in the background
 ```
 
 Examples: Script Editor → Examples (exploring a frame, cover echo, rain echoes, bright points,
@@ -114,7 +141,12 @@ rec = lab.open("data/synthetic/city_rain")
 pipe = lab.Pipeline()
 pipe.load("src/lidarlab/examples/presets/rain_denoise.yaml")
 clean = pipe(rec[150])
+report = lab.export_run(rec, "data/exports/clean", pipe)   # blocks until done
+print(report.summary())
 ```
+
+With `processes=True` on Windows, call `export_run` under `if __name__ == "__main__":`, since
+each worker process imports the script again.
 
 ## Test data
 
@@ -124,6 +156,8 @@ clean = pipe(rec[150])
 # synthetic run: 200 frames, 3 echoes, rain and spray from the middle on; every point has a
 # ground-truth label (cover, ground, object, edge, vegetation, rain, spray)
 venv\Scripts\python -m lidarlab.datasets.synthetic data\synthetic\city_rain
+# the same at full length: 600 frames, 2.9 GB
+venv\Scripts\python -m lidarlab.datasets.synthetic data\synthetic\city_rain_600 --frames 600
 
 # KITTI raw drive: downloads ~0.9 GB and converts it
 venv\Scripts\python -m lidarlab.datasets.kitti 2011_09_26_drive_0011 data\kitti
