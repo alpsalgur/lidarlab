@@ -34,6 +34,7 @@ class SeekBar(QtWidgets.QWidget):
         self.index = 0
         self.cached = np.zeros(0, bool)
         self.processed = np.zeros(0, bool)
+        self.marks: list[int] = []  # bookmarked frames
         self._dragging = False
         self.setMinimumSize(120, 24)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
@@ -53,6 +54,10 @@ class SeekBar(QtWidgets.QWidget):
 
     def set_processed(self, mask: np.ndarray) -> None:
         self.processed = mask
+        self.update()
+
+    def set_marks(self, frames: list[int]) -> None:
+        self.marks = list(frames)
         self.update()
 
     def set_index(self, i: int) -> None:
@@ -94,6 +99,12 @@ class SeekBar(QtWidgets.QWidget):
             for a, b in true_runs(self.processed):
                 x0, x1 = max(self._x(a) - half, t.left()), min(self._x(b) + half, t.right())
                 p.drawRect(QtCore.QRectF(x0, t.bottom() + 2, x1 - x0, 2))
+            p.setBrush(QtGui.QColor("#ffd54f"))  # bookmarks: small triangles above the track
+            for frame in self.marks:
+                x = self._x(frame)
+                p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(x - 3.5, t.top() - 7),
+                                               QtCore.QPointF(x + 3.5, t.top() - 7),
+                                               QtCore.QPointF(x, t.top() - 2)]))
             x = self._x(self.index)
             p.setBrush(QtGui.QColor(theme.ACCENT))
             p.drawRoundedRect(QtCore.QRectF(t.left(), t.top(), x - t.left(), t.height()), 3, 3)
