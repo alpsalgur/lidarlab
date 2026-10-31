@@ -140,6 +140,89 @@ def main() -> int:
     w.set_camera("bev")
     shot("ui_04_bev.png")
 
+    # filters: preset, sliders, split view, background processing
+    w.clear_layers()
+    w.set_camera("3d")
+    preset = examples_dir() / "presets" / "rain_denoise.yaml"
+    checks["preset loads"] = w.load_preset(str(preset)) and \
+        [s.name for s in w.pipeline] == ["echo", "weak_first_echo", "dror"]
+    editor = w.properties.step_editor
+    w.pipeline_panel.select_step("dror")
+    pump(0.2)
+    checks["selected step shows sliders"] = (editor.isVisible() and editor.step_name == "dror"
+                                            and editor.widgets["beta"].slider is not None)
+    dror = w.pipeline["dror"]
+    if "label" in w.raw.fields:  # score the preset against the ground truth
+        kept = np.isin(w.raw.index, w.output.index)
+        noise = np.isin(w.raw.label, [5, 6])  # rain, spray (the cover echo goes anyway)
+        caught = np.count_nonzero(~kept & noise)
+        removed = np.count_nonzero(~kept & (w.raw.label != 0))
+        numbers["rain preset vs labels"] = (f"recall {caught / noise.sum():.0%}, precision "
+                                            f"{caught / max(removed, 1):.0%} on frame {w.index}")
+        checks["rain preset removes most rain and spray"] = caught / noise.sum() > 0.9
+    run_example("08_score_against_labels.py")
+    checks["scoring example runs"] = "missed_noise" in w.layers
+    w.remove_layer("missed_noise")
+    start_beta = dror.values["beta"]
+    removed_before = dror.n_in - dror.n_out
+    beta = editor.widgets["beta"]
+    start = time.perf_counter()
+    for value in range(beta.slider.value(), beta.slider.value() - 150, -10):  # drag to beta ~1.6
+        beta.slider.setValue(value)
+        pump(0.02)
+    drag = time.perf_counter() - start
+    checks["slider drag applies"] = wait(
+        lambda: abs(dror.values["beta"] - beta.editor.value()) < 1e-6
+        and w.preview_pending is None)
+    removed_after = dror.n_in - dror.n_out
+    numbers[f"DROR beta {start_beta:.1f} -> {dror.values['beta']:.1f}"] = (
+        f"removed {removed_before:,} -> {removed_after:,} points (15 slider steps in "
+        f"{drag:.1f} s, result shown after {time.perf_counter() - start:.1f} s)")
+    checks["smaller radius removes more"] = removed_after > removed_before
+    editor._reset()
+    checks["reset to defaults"] = (dror.values["beta"] == 3.0
+                                   and editor.widgets["beta"].editor.value() == 3.0)
+    w.display.show_removed = True
+    w.toggle_split(True)
+    checks["split view"] = w.view.split and w.view.raw_cloud.count == len(w.raw) - \
+        int(np.count_nonzero(np.isin(w.raw.echo, list(w.display.hidden_echoes))))
+    camera = w.view.renderer.GetActiveCamera()
+    before = camera.GetPosition()
+    vtk_widget.setFocus()
+    left = QtCore.QPoint(vtk_widget.width() // 4, vtk_widget.height() // 2)
+    QtTest.QTest.mousePress(vtk_widget, QtCore.Qt.MouseButton.LeftButton, pos=left)
+    for dx in range(10, 90, 10):
+        QtTest.QTest.mouseMove(vtk_widget, left + QtCore.QPoint(dx, dx // 4))
+        pump(0.01)
+    QtTest.QTest.mouseRelease(vtk_widget, QtCore.Qt.MouseButton.LeftButton,
+                              pos=left + QtCore.QPoint(80, 20))
+    checks["dragging the left half turns the shared camera"] = camera.GetPosition() != before
+    w.set_camera("3d")
+    shot("ui_06_split_rain_filtered.png")
+    w.display.show_removed = False
+    w.toggle_split(False)
+
+    w.player.stalls = 0
+    fps, stalls = play_for(8.0, 1.0)
+    processed = len(w.processor.cached())
+    numbers["playback 1x with 3 filters"] = (f"{fps:.1f} fps, {stalls} waits; {processed} frames "
+                                              f"processed in the background")
+    checks["filters keep playback above 5 fps"] = fps > 5.0
+    step_ms = "; ".join(f"{s.name} {s.ms:.0f} ms" for s in w.pipeline if s.ms is not None)
+    numbers["step times (shown frame)"] = step_ms
+
+    name = w.add_filter("ground")
+    checks["filter added from the menu"] = (name == "ground" and editor.step_name == "ground"
+                                            and w.pipeline["ground"].n_out is not None)
+    saved = args.out / "selftest_preset.yaml"
+    checks["preset saves"] = w.save_preset(str(saved)) and "filter: ground" in saved.read_text()
+    w.pipeline.remove("ground")
+    run_example("07_filter_with_sliders.py")
+    checks["example filter registered"] = wait(lambda: "ring_jumps" in w.pipeline)
+    jumps = w.pipeline["ring_jumps"]
+    checks["example filter has sliders"] = set(jumps.params) == {"max_jump", "max_range", "echo"}
+    numbers["ring_jumps on this frame"] = f"{jumps.n_in:,} -> {jumps.n_out:,} in {jumps.ms:.0f} ms"
+
     # a second test run (other layout)
     if args.other:
         w.pipeline.clear()
