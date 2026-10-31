@@ -59,14 +59,20 @@ def _has_neighbors(points: np.ndarray, radius, k: int, query: np.ndarray | None 
     ball: same answer, and fast where points are dense. Query points must be in ``points``.
     """
     query = points if query is None else query
-    if len(points) <= k:
+    if len(points) <= k or not len(query):
         return np.zeros(len(query), bool)
-    d, _ = cKDTree(points).query(query, k + 1, workers=-1)  # the nearest one is the point itself
-    return d[:, k] <= radius
+    # unbalanced trees build ~1.6x faster on scans; the bound cuts the search short
+    bound = float(np.max(radius)) * (1 + 1e-6) + 1e-9
+    d, _ = _tree(points).query(query, k + 1, distance_upper_bound=bound, workers=-1)
+    return d[:, k] <= radius  # the nearest one is the point itself; inf beyond the bound
+
+
+def _tree(points: np.ndarray) -> cKDTree:
+    return cKDTree(points, balanced_tree=False)
 
 
 def _mean_knn_distance(points: np.ndarray, k: int) -> np.ndarray:
-    d, _ = cKDTree(points).query(points, k + 1, workers=-1)  # the nearest one is the point itself
+    d, _ = _tree(points).query(points, k + 1, workers=-1)  # the nearest one is the point itself
     return d[:, 1:].mean(axis=1)
 
 

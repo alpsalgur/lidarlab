@@ -20,7 +20,7 @@ class Processor:
     ``invalidate``. ``on_done(i)`` is called from a worker thread when frame ``i`` is ready.
     """
 
-    def __init__(self, pipeline: Pipeline, cache_bytes: int = 1 << 30, workers: int = 2):
+    def __init__(self, pipeline: Pipeline, cache_bytes: int = 1 << 30, workers: int = 3):
         self.pipeline = pipeline
         self.cache_budget = cache_bytes
         self.on_done: Callable[[int], None] | None = None
@@ -89,8 +89,8 @@ class Processor:
             return
         with self._cv:
             version = self.pipeline.version
-            self._queue = [i for i in indices
-                           if i not in self._busy and not self._fresh(i, version)]
+            # frames being processed stay queued: their result may be for an older version
+            self._queue = [i for i in indices if not self._fresh(i, version)]
             self._cv.notify_all()
 
     def notify(self) -> None:
@@ -130,8 +130,11 @@ class Processor:
 
     def _next(self) -> int | None:
         rec = self.rec
-        for i in self._queue:
-            if rec is not None and i not in self._busy and rec.is_cached(i):
+        version = self.pipeline.version
+        for i in list(self._queue):
+            if self._fresh(i, version):
+                self._queue.remove(i)  # done by compute() or another worker meanwhile
+            elif rec is not None and i not in self._busy and rec.is_cached(i):
                 return i
         return None
 
@@ -150,5 +153,6 @@ class Processor:
             with self._cv:
                 self._busy.discard(i)
                 stored = result is not None and rec is self.rec and self._store(i, result)
-            if stored and self.on_done is not None:
-                self.on_done(i)
+                callback = None if self._closed else self.on_done
+            if stored and callback is not None:
+                callback(i)
