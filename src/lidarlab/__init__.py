@@ -8,11 +8,15 @@
     pipe = lab.Pipeline()
     pipe.add(lab.filters.DROR(beta=3))
     clean = pipe(frame)
+
+    lab.export_run("data/synthetic/city_rain", "data/exports/clean", pipe)
 """
 
 from .core import filters
+from .core.batch import ExportReport, export_run
 from .core.filter import Filter, Param
 from .core.filter import filter_ as filter  # noqa: A004 - lab.filter reads naturally
+from .core.formats import write_pcd, write_ply
 from .core.frame import Frame
 from .core.npz import read_frame, write_frame
 from .core.pipeline import Pipeline, Processed, Step, StepError, pipeline, step
@@ -22,6 +26,7 @@ from .core.recording import Recording
 __version__ = "0.2.0"
 
 __all__ = [
+    "ExportReport",
     "Filter",
     "Frame",
     "Param",
@@ -31,6 +36,7 @@ __all__ = [
     "Recording",
     "Step",
     "StepError",
+    "export_run",
     "filter",
     "filters",
     "open",
@@ -38,6 +44,8 @@ __all__ = [
     "read_frame",
     "step",
     "write_frame",
+    "write_pcd",
+    "write_ply",
 ]
 
 

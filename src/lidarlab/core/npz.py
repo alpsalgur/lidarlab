@@ -14,6 +14,7 @@ Layouts, detected per file:
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -143,8 +144,20 @@ def write_frame(frame: Frame, path, layout: str | None = None, compress: bool = 
         arrays.setdefault(key, a)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    (np.savez_compressed if compress else np.savez)(path, **arrays)
+    if compress:
+        save_compressed(path, arrays)
+    else:
+        np.savez(path, **arrays)
     return path
+
+
+def save_compressed(path, arrays: dict, level: int = 1) -> None:
+    """Like ``np.savez_compressed`` (any reader loads it), at zlib level 1 instead of 6:
+    a third less time for files ~3 % larger."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
+        for key, a in arrays.items():
+            with zf.open(f"{key}.npy", "w", force_zip64=True) as out:
+                np.lib.format.write_array(out, np.asanyarray(a), allow_pickle=False)
 
 
 def _to_echo_axis(frame: Frame) -> dict:

@@ -21,6 +21,7 @@ import inspect
 import runpy
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -222,6 +223,15 @@ class Pipeline:
     @property
     def active(self) -> bool:
         return any(s.enabled for s in self.steps)
+
+    def snapshot(self) -> Pipeline:
+        """An independent copy: later changes here (sliders, scripts run again) do not reach
+        it. Filters are copied with their values; plain functions are shared."""
+        copy = Pipeline()
+        for s in self.steps:
+            func = deepcopy(s.func) if isinstance(s.func, Filter) else s.func
+            copy.steps.append(Step(s.name, func, s.enabled, owner=copy))
+        return copy
 
     # running
 
