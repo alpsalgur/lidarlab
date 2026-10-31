@@ -129,6 +129,10 @@ _ICONS = {
             '<circle cx="15.5" cy="12" r="2.3" fill="{c}"/>',
     "folder": '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1'
               '-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" fill="none" stroke="{c}" stroke-width="1.6"/>',
+    "split": '<rect x="3" y="5" width="18" height="14" rx="1.5" fill="none" stroke="{c}"'
+             ' stroke-width="1.6"/><path d="M12 5v14" stroke="{c}" stroke-width="1.6"/>'
+             '<circle cx="7.5" cy="12" r="1.3" fill="{c}"/><circle cx="16.5" cy="12" r="1.3"'
+             ' fill="#4ec96b"/>',
     "lidar": '<circle cx="12" cy="12" r="9" fill="none" stroke="{c}" stroke-width="1.6"/>'
              '<circle cx="12" cy="12" r="5.5" fill="none" stroke="{c}" stroke-width="1.6"/>'
              '<circle cx="12" cy="12" r="2.2" fill="{c}"/>',

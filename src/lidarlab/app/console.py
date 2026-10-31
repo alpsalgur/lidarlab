@@ -55,6 +55,10 @@ class PythonShell(QtWidgets.QWidget):
         """Run a script in the shell's namespace (IPython's ``%run -i``)."""
         self.widget.execute(f'%run -i "{path}"')
 
+    def run_file_now(self, path: str) -> None:
+        """Run a script in the shell's namespace before returning, without echoing it."""
+        self.shell.run_line_magic("run", f'-i "{path}"')
+
     def print_error(self, text: str) -> None:
         self.widget._append_plain_text(f"\x1b[31m{text}\x1b[0m\n", before_prompt=True)
 

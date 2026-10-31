@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from lidarlab import Filter
+from lidarlab.core.filter import FunctionFilter
+
 from . import theme
+from .step_editor import filter_menu
 
 KIND_ROLE = QtCore.Qt.ItemDataRole.UserRole
 RIGHT = QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
@@ -16,18 +20,32 @@ class PipelinePanel(QtWidgets.QWidget):
     """Tree of what is drawn: the run (raw points), its steps in order, then the layers.
 
     Check boxes switch steps and layers on and off; the columns show the points left after
-    each step (with the change) and how long the step took on the current frame.
+    each step (with the change) and how long the step took on the current frame. Selecting a
+    step shows its parameters under Properties.
     """
 
     def __init__(self, window, parent=None):
         super().__init__(parent)
         self.w = window
         self._building = False
+        self._signature = None
         self._step_items: dict[str, QtWidgets.QTreeWidgetItem] = {}
         self._layer_items: dict[str, QtWidgets.QTreeWidgetItem] = {}
         self.run_item: QtWidgets.QTreeWidgetItem | None = None
         toolbar = QtWidgets.QToolBar()
         toolbar.setIconSize(QtCore.QSize(16, 16))
+        self.add_menu = filter_menu(self, window.add_filter)
+        add = QtWidgets.QToolButton()
+        add.setMenu(self.add_menu)
+        add.setIcon(theme.icon("add"))
+        add.setText("Filter")
+        add.setToolTip("Add a built-in filter after the last step")
+        add.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        add.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        toolbar.addWidget(add)
+        toolbar.addAction(theme.icon("open"), "Load pipeline preset…", window.load_preset)
+        toolbar.addAction(theme.icon("save"), "Save pipeline preset…", window.save_preset)
+        toolbar.addSeparator()
         toolbar.addAction(theme.icon("up"), "Move step up", lambda: self._move(-1))
         toolbar.addAction(theme.icon("down"), "Move step down", lambda: self._move(1))
         toolbar.addAction(theme.icon("remove"), "Remove the selected step or layer", self._remove)
@@ -43,6 +61,7 @@ class PipelinePanel(QtWidgets.QWidget):
         header.resizeSection(1, 112)
         header.resizeSection(2, 44)
         self.tree.itemChanged.connect(self._item_changed)
+        self.tree.currentItemChanged.connect(self._current_changed)
         self.tree.itemDoubleClicked.connect(self._open_source)
         self.tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._context_menu)
@@ -53,7 +72,17 @@ class PipelinePanel(QtWidgets.QWidget):
         layout.addWidget(self.tree)
 
     def rebuild(self) -> None:
+        """Rebuild the tree if steps or layers were added, removed, reordered or toggled;
+        otherwise just refresh the numbers. The selection survives."""
         w = self.w
+        signature = (w.rec.name if w.rec is not None else None, w.view.cloud.visible,
+                     tuple((s.name, s.enabled, id(s.func)) for s in w.pipeline),
+                     tuple((n, layer.visible, layer.color) for n, layer in w.layers.items()))
+        if signature == self._signature:
+            self.update_stats()
+            return
+        self._signature = signature
+        selected = self._selected()
         self._building = True
         self.tree.clear()
         self._step_items.clear()
@@ -64,12 +93,14 @@ class PipelinePanel(QtWidgets.QWidget):
         tip = str(w.rec.path) if w.rec is not None else "File > Open Test Run"
         self.run_item.setToolTip(0, tip)
         for step in w.pipeline:
-            item = self._item(self.run_item, step.name, ("step", step.name), step.enabled,
-                              theme.text_icon("ƒ"))
-            doc = (step.func.__doc__ or "").strip()
+            builtin = isinstance(step.func, Filter) and not isinstance(step.func, FunctionFilter)
+            icon = theme.text_icon("F", theme.ACCENT) if builtin else theme.text_icon("ƒ")
+            item = self._item(self.run_item, step.name, ("step", step.name), step.enabled, icon)
+            title = getattr(step.func, "title", "")
+            doc = step.description.split("\n\n")[0]
             source = step.source
-            tip = [f"step {step.name}"] + ([doc] if doc else [])
-            if source:
+            tip = [f"{step.name}" + (f" – {title}" if title else "")] + ([doc] if doc else [])
+            if source and not builtin:
                 tip.append(f"{source[0]}:{source[1]}  (double-click to open)")
             item.setToolTip(0, "\n".join(tip))
             self._step_items[step.name] = item
@@ -80,8 +111,28 @@ class PipelinePanel(QtWidgets.QWidget):
             item.setToolTip(0, f"{kind} layer, {layer.color}")
             self._layer_items[layer.name] = item
         self.tree.expandAll()
+        if selected is not None:
+            kind, key = selected
+            item = (self._step_items.get(key) if kind == "step" else
+                    self._layer_items.get(key) if kind == "layer" else self.run_item)
+            if item is not None:
+                self.tree.setCurrentItem(item)
         self._building = False
+        if selected is not None and selected[0] == "step":
+            # the step may be gone, or redefined by a script with other parameters
+            w.properties.step_editor.show_step(selected[1] if selected[1] in w.pipeline else None)
         self.update_stats()
+
+    def select_step(self, name: str) -> None:
+        item = self._step_items.get(name)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+
+    def _current_changed(self, item, _previous=None) -> None:
+        if self._building:
+            return
+        kind, name = item.data(0, KIND_ROLE) if item is not None else (None, None)
+        self.w.properties.step_editor.show_step(name if kind == "step" else None)
 
     def _item(self, parent, text, kind, checked, icon) -> QtWidgets.QTreeWidgetItem:
         item = QtWidgets.QTreeWidgetItem([text, "", ""])
@@ -142,6 +193,7 @@ class PipelinePanel(QtWidgets.QWidget):
             item.setForeground(1, QtGui.QBrush(QtGui.QColor(theme.ERROR if failed else theme.TEXT)))
             item.setToolTip(1, f"{type(layer.error).__name__}: {layer.error}" if failed else "")
         self._building = False
+        w.properties.step_editor.update_stats()
 
     def _selected(self) -> tuple[str, str | None] | None:
         item = self.tree.currentItem()

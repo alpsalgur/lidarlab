@@ -47,8 +47,9 @@ class Rate:
 class Player(QtCore.QObject):
     """Advances frames at the recording's rate times ``speed`` (0 = as fast as frames load).
 
-    The playhead only moves to frames that are already loaded, so slow loading shows up as
-    a lower frame rate (``stalls`` counts the waits) instead of skipped frames.
+    The playhead only moves to frames that are loaded and, if there are processing steps,
+    processed in the background, so slow loading or heavy filters show up as a lower frame
+    rate (``stalls`` counts the waits) instead of skipped frames.
     """
 
     stateChanged = QtCore.Signal(bool)
@@ -112,7 +113,7 @@ class Player(QtCore.QObject):
                 self.pause()
                 return
             nxt = 0
-        if w.rec.is_cached(nxt):
+        if w.frame_ready(nxt):
             w.show_frame(nxt)
         else:
             self.stalls += 1

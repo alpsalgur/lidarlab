@@ -13,9 +13,13 @@ from vtkmodules.util import numpy_support
 from vtkmodules.vtkCommonCore import vtkLookupTable, vtkPoints, vtkVariant
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
 from vtkmodules.vtkRenderingAnnotation import vtkScalarBarActor
-from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkTextActor
+from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer, vtkTextActor
 
 ECHO_COLORS = ("#ff9f1c", "#d9d9d9", "#4dabf7", "#69db7c", "#da77f2", "#ffd43b")
+# ground-truth classes; the synthetic run's 0-6 are cover, ground, object, edge, vegetation,
+# rain, spray. Other ids (e.g. WADS snow 110) take a color by value.
+LABEL_COLORS = ("#ff9f1c", "#8d6e63", "#b0bec5", "#4db6ac", "#66bb6a", "#4fc3f7", "#e040fb",
+                "#ffd54f", "#ef5350", "#7e57c2", "#26c6da", "#d4e157")
 BACKGROUNDS = {
     "Dark gradient": ("#0b0d12", "#2b2f3d"),
     "Black": ("#000000", None),
@@ -41,6 +45,20 @@ def _plain_text(prop, size: int) -> None:
     prop.SetItalic(False)
     prop.SetShadow(False)
     prop.SetColor(0.85, 0.85, 0.85)
+
+
+def _corner_label(text: str) -> vtkTextActor:
+    actor = vtkTextActor()
+    actor.SetInput(f" {text} ")
+    actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+    actor.SetPosition(0.012, 0.955)
+    prop = actor.GetTextProperty()
+    _plain_text(prop, 14)
+    prop.SetVerticalJustificationToTop()
+    prop.SetBackgroundColor(*LEGEND_BACKGROUND)
+    prop.SetBackgroundOpacity(0.7)
+    return actor
+
 
 _ids = np.arange(1, dtype=np.int64)
 
@@ -84,14 +102,19 @@ def colormap_lut(name: str, lo: float, hi: float) -> vtkLookupTable:
     return lut
 
 
+def category_color(value: int, palette: tuple[str, ...] = ECHO_COLORS) -> str:
+    return palette[int(value) % len(palette)]
+
+
 @lru_cache(maxsize=16)
-def category_lut(values: tuple[int, ...], labels: tuple[str, ...]) -> vtkLookupTable:
-    """One color per value (echo numbers), with labels for the legend."""
+def category_lut(values: tuple[int, ...], labels: tuple[str, ...],
+                 palette: tuple[str, ...] = ECHO_COLORS) -> vtkLookupTable:
+    """One color per value (echo numbers, classes), with labels for the legend."""
     lut = vtkLookupTable()
     lut.IndexedLookupOn()
     lut.SetNumberOfTableValues(len(values))
     for k, (value, label) in enumerate(zip(values, labels, strict=True)):
-        lut.SetTableValue(k, *pv.Color(ECHO_COLORS[value % len(ECHO_COLORS)]).float_rgba)
+        lut.SetTableValue(k, *pv.Color(category_color(value, palette)).float_rgba)
         lut.SetAnnotation(vtkVariant(int(value)), label)
     lut.SetNanColor(0.5, 0.5, 0.5, 1.0)
     return lut
@@ -163,6 +186,10 @@ class RenderView(QtWidgets.QWidget):
         layout.addWidget(self.plotter.interactor)
         self.renderer = self.plotter.renderer
         self.cloud = PointLayer(self.renderer, size=2.0)
+        self.raw_renderer: vtkRenderer | None = None  # left half in split view
+        self.raw_cloud: PointLayer | None = None
+        self._split_props: list = []
+        self._raw_helpers: list = []
         self.layers: dict[str, PointLayer] = {}
         self._text_color = (0.85, 0.85, 0.85)
         self._category_actors: list[vtkTextActor] = []
@@ -212,6 +239,8 @@ class RenderView(QtWidgets.QWidget):
         self._category_actors = []
         if not items:
             return
+        if len(items) > 13:  # keep the list on screen
+            items = [*items[:12], (f"… {len(items) - 12} more", "#8b949e")]
         for k, (label, color) in enumerate([(title, None), *items]):
             actor = vtkTextActor()
             actor.SetInput(f" {label} ")
@@ -259,6 +288,63 @@ class RenderView(QtWidgets.QWidget):
 
     def set_point_size(self, size: float) -> None:
         self.cloud.set_size(size)
+        if self.raw_cloud is not None:
+            self.raw_cloud.set_size(size)
+
+    # split view
+
+    @property
+    def split(self) -> bool:
+        return self.raw_renderer is not None
+
+    def set_split(self, on: bool) -> None:
+        """Raw points in the left half, the main cloud in the right; one shared camera."""
+        if on == self.split:
+            return
+        window = self.plotter.render_window
+        if on:
+            r = vtkRenderer()
+            r.SetViewport(0.0, 0.0, 0.5, 1.0)
+            r.SetActiveCamera(self.renderer.GetActiveCamera())  # both halves move together
+            self.raw_renderer = r
+            self.raw_cloud = PointLayer(r, size=self.cloud.actor.GetProperty().GetPointSize())
+            self._copy_background()
+            self._share_helpers()
+            r.AddViewProp(_corner_label("raw"))
+            main_label = _corner_label("after pipeline")
+            self.renderer.AddViewProp(main_label)
+            self._split_props = [main_label]
+            window.AddRenderer(r)
+            self.renderer.SetViewport(0.5, 0.0, 1.0, 1.0)
+        else:
+            window.RemoveRenderer(self.raw_renderer)
+            for prop in self._split_props:
+                self.renderer.RemoveViewProp(prop)
+            self.raw_renderer = self.raw_cloud = None
+            self._split_props = []
+            self.renderer.SetViewport(0.0, 0.0, 1.0, 1.0)
+        self.render()
+
+    def set_raw_cloud(self, xyz, scalars=None, lut=None) -> None:
+        if self.raw_cloud is not None:
+            self.raw_cloud.set_points(xyz, scalars, lut)
+
+    def _copy_background(self) -> None:
+        if self.raw_renderer is not None:
+            r, main = self.raw_renderer, self.renderer
+            r.SetBackground(main.GetBackground())
+            r.SetBackground2(main.GetBackground2())
+            r.SetGradientBackground(main.GetGradientBackground())
+
+    def _share_helpers(self) -> None:
+        """Show the main view's rings, grid and ego car in the raw half too."""
+        if self.raw_renderer is None:
+            return
+        for actor in self._raw_helpers:
+            self.raw_renderer.RemoveViewProp(actor)
+        self._raw_helpers = list(self._helpers.values())
+        for actor in self._raw_helpers:
+            self.raw_renderer.AddViewProp(actor)
 
     # scene
 
@@ -267,6 +353,7 @@ class RenderView(QtWidgets.QWidget):
         self.plotter.set_background(bottom, top=top)
         # legend text sits on its own dark background, so it stays light; helpers adapt
         self._text_color = (0.85, 0.85, 0.85)
+        self._copy_background()
 
     def set_ground(self, z: float) -> None:
         """Rebuild the range rings, grid and ego car outline at ground height ``z``."""
@@ -290,6 +377,7 @@ class RenderView(QtWidgets.QWidget):
         self._helpers["ego"] = self.plotter.add_mesh(ego, style="wireframe", color="#4fc3f7",
                                                      line_width=2, name="ego", **add)
         self.show_helpers(**self._helper_flags)
+        self._share_helpers()
 
     def show_helpers(self, rings: bool = True, grid: bool = False, ego: bool = True,
                      axes: bool | None = None) -> None:
@@ -320,6 +408,8 @@ class RenderView(QtWidgets.QWidget):
 
     def render(self) -> None:
         self.renderer.ResetCameraClippingRange()
+        if self.raw_renderer is not None:
+            self.raw_renderer.ResetCameraClippingRange()
         self.plotter.render()
 
     # output

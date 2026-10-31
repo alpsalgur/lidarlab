@@ -10,6 +10,7 @@ from lidarlab import Frame
 
 SOLID = "solid color"
 COMPUTED = ("range", "height")
+CATEGORICAL = ("echo", "label")  # one color per value, named in the legend
 COLORMAPS = ("turbo", "viridis", "plasma", "inferno", "magma", "cividis", "jet", "rainbow", "gray",
              "coolwarm", "Spectral", "twilight")
 DEFAULT_CMAPS = {"intensity": "turbo", "reflectivity": "turbo", "range": "viridis",
@@ -26,6 +27,7 @@ class Display:
     point_size: float = 2.0
     hidden_echoes: set[int] = field(default_factory=set)
     show_removed: bool = False
+    split: bool = False  # raw points left, pipeline output right
     legend: bool = True
     rings: bool = True
     grid: bool = False
@@ -52,7 +54,7 @@ def color_values(frame: Frame, mode: str) -> np.ndarray | None:
     values = frame.fields.get(mode)
     if values is None or values.ndim != 1 or values.dtype.kind not in "biuf":
         return None
-    if mode == "echo":
+    if mode in CATEGORICAL:
         return values.astype(np.int32)
     return values if values.dtype.kind == "f" else values.astype(np.float32)
 

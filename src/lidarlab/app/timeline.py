@@ -33,6 +33,7 @@ class SeekBar(QtWidgets.QWidget):
         self.count = 0
         self.index = 0
         self.cached = np.zeros(0, bool)
+        self.processed = np.zeros(0, bool)
         self._dragging = False
         self.setMinimumSize(120, 24)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
@@ -40,12 +41,18 @@ class SeekBar(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Click or drag to seek. Light gray: frames in memory")
+        self.setToolTip("Click or drag to seek. Light gray: frames in memory; green line: "
+                        "frames the pipeline has processed")
 
     def set_count(self, n: int) -> None:
         self.count = n
         self.index = 0
         self.cached = np.zeros(n, bool)
+        self.processed = np.zeros(n, bool)
+        self.update()
+
+    def set_processed(self, mask: np.ndarray) -> None:
+        self.processed = mask
         self.update()
 
     def set_index(self, i: int) -> None:
@@ -83,6 +90,10 @@ class SeekBar(QtWidgets.QWidget):
             for a, b in true_runs(self.cached):
                 x0, x1 = max(self._x(a) - half, t.left()), min(self._x(b) + half, t.right())
                 p.drawRect(QtCore.QRectF(x0, t.top(), x1 - x0, t.height()))
+            p.setBrush(QtGui.QColor("#4ec96b"))
+            for a, b in true_runs(self.processed):
+                x0, x1 = max(self._x(a) - half, t.left()), min(self._x(b) + half, t.right())
+                p.drawRect(QtCore.QRectF(x0, t.bottom() + 2, x1 - x0, 2))
             x = self._x(self.index)
             p.setBrush(QtGui.QColor(theme.ACCENT))
             p.drawRoundedRect(QtCore.QRectF(t.left(), t.top(), x - t.left(), t.height()), 3, 3)

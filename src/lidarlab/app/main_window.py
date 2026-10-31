@@ -11,12 +11,14 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 import lidarlab
-from lidarlab import Frame, Recording, write_frame
+from lidarlab import Frame, Processor, Recording, write_frame
+from lidarlab.core.filters import available
 
 from . import theme
 from .api import HELP_HTML, ViewAPI
 from .console import PythonShell
 from .display import (
+    CATEGORICAL,
     SOLID,
     Display,
     auto_range,
@@ -27,12 +29,13 @@ from .display import (
 )
 from .editor import ScriptEditor
 from .info_panel import InfoPanel
-from .paths import data_dir, scripts_dir
+from .paths import data_dir, examples_dir, scripts_dir
 from .pipeline_panel import PipelinePanel
 from .player import Layer, Player, Rate
 from .properties_panel import PropertiesPanel
-from .render_view import ECHO_COLORS, RenderView, category_lut, colormap_lut
+from .render_view import LABEL_COLORS, RenderView, category_color, category_lut, colormap_lut
 from .runs_panel import RunsPanel
+from .step_editor import filter_menu, preset_dialog
 from .timeline import SPEEDS, PlayerBar
 
 Qt = QtCore.Qt
@@ -67,6 +70,7 @@ class MainWindow(QtWidgets.QMainWindow):
     Python shell and script editor below, the 3D view and player bar in the middle."""
 
     frameLoaded = QtCore.Signal(int)  # emitted by loader threads, handled in the GUI thread
+    frameProcessed = QtCore.Signal(int)  # emitted by processing threads
 
     def __init__(self, run: str | None = None, restore_layout: bool = True):
         super().__init__()
@@ -81,6 +85,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shown: Frame | None = None
         self.t0: float | None = None  # timestamp of frame 0
         self.pipeline = lidarlab.pipeline
+        self.processor = Processor(self.pipeline)  # steps run ahead of the playhead
+        self.processor.on_done = self.frameProcessed.emit
+        self.preview_pending: int | None = None  # frame waiting for its background result
+        self._live = False  # set while a slider applies a change
         self.display = Display()
         self.layers: dict[str, Layer] = {}
         self.timing: dict[str, float] = {}
@@ -89,6 +97,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reported: dict[str, str | None] = {}
         self._last_info = 0.0
         self._cache_version = -1
+        self._processed_version = -1
 
         self.view = RenderView(self)
         self.player = Player(self)
@@ -122,6 +131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player_bar.speedChanged.connect(self.player.set_speed)
         self.player.stateChanged.connect(self._play_state_changed)
         self.frameLoaded.connect(self._frame_loaded)
+        self.frameProcessed.connect(self._frame_processed)
         self.pipeline.subscribe(self._pipeline_changed)
         QtWidgets.QApplication.instance().installEventFilter(self)
         self._excepthook = sys.excepthook
@@ -189,6 +199,11 @@ class MainWindow(QtWidgets.QMainWindow):
                               tip="Fit the color range to the current frame"),
             "clear_pipeline": action("Remove All Steps", lambda: self.pipeline.clear(),
                                      icon="trash"),
+            "split": action("Split View: Raw | After Pipeline", self.toggle_split, "Ctrl+T",
+                            "split", "Raw points left, the pipeline's output right (Ctrl+T)",
+                            checkable=True),
+            "load_preset": action("&Load Pipeline Preset…", self.load_preset, icon="open"),
+            "save_preset": action("&Save Pipeline Preset…", self.save_preset, icon="save"),
             "clear_layers": action("Remove Highlights and Overlays", self.clear_layers),
             "reset_layout": action("Reset Layout", self.reset_layout),
             "help_api": action("&Scripting Reference", self.show_scripting_help, "F1"),
@@ -233,7 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _default_sizes(self) -> None:
         d = self.docks
         horizontal, vertical = Qt.Orientation.Horizontal, Qt.Orientation.Vertical
-        self.resizeDocks([d["runs"], d["properties"]], [360, 340], horizontal)
+        self.resizeDocks([d["runs"], d["properties"]], [340, 390], horizontal)
         self.resizeDocks([d["runs"], d["pipeline"]], [400, 400], vertical)
         self.resizeDocks([d["properties"], d["info"]], [480, 320], vertical)
         self.resizeDocks([d["shell"]], [330], vertical)
@@ -260,6 +275,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in ("cam_3d", "cam_bev", "cam_front", "cam_side", "cam_fit"):
             camera.addAction(a[name])
         view.addAction(a["rescale"])
+        view.addAction(a["split"])
         view.addSeparator()
         view.addAction(a["reset_layout"])
 
@@ -275,6 +291,15 @@ class MainWindow(QtWidgets.QMainWindow):
             group.addAction(item)
         play.addSeparator()
         play.addAction(a["cache_all"])
+
+        filters = bar.addMenu("F&ilters")
+        filters.addMenu(filter_menu(self, self.add_filter))
+        filters.addSeparator()
+        filters.addAction(a["load_preset"])
+        filters.addAction(a["save_preset"])
+        filters.addSeparator()
+        filters.addAction(a["split"])
+        filters.addAction(a["clear_pipeline"])
 
         python = bar.addMenu("P&ython")
         e = self.editor.actions_
@@ -313,6 +338,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in ("cam_3d", "cam_bev", "cam_front", "cam_side"):
             bar.addAction(a[name])
         bar.addAction(a["cam_fit"])
+        bar.addAction(a["split"])
         bar.addSeparator()
         bar.addAction(self.editor.actions_["run"])
         bar.addAction(a["cache_all"])
@@ -363,6 +389,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rec.close()
         self.rec = rec
         rec.on_loaded = self.frameLoaded.emit
+        self.processor.set_recording(rec)
         self.index, self._wanted = 0, None
         self.raw = self.output = self.shown = None
         self._reported.clear()
@@ -454,20 +481,56 @@ class MainWindow(QtWidgets.QMainWindow):
                 order = [j % n for j in order]
         else:
             order = [i, i + 1, i - 1, i + 2, i + 3, i - 2, i + 4, i + 5]
-        rec.prefetch([j for j in order if 0 <= j < n])
+        order = [j for j in order if 0 <= j < n]
+        rec.prefetch(order)
+        self.processor.request(order)
+
+    def frame_ready(self, i: int) -> bool:
+        """Frame ``i`` can be shown without waiting: loaded and, with steps, processed."""
+        if self.rec is None or not self.rec.is_cached(i):
+            return False
+        return not self.pipeline.active or self.processor.has(i)
 
     def _frame_loaded(self, i: int) -> None:
+        self.processor.notify()
         if self._wanted == i and self.rec is not None:
             self.show_frame(i)
 
+    def _frame_processed(self, i: int) -> None:
+        if self.preview_pending == i and self.raw is not None and self.index == i:
+            self.preview_pending = None
+            self._display(self.raw)
+
+    def apply_live(self, change) -> None:
+        """Run ``change()`` (a parameter edit) and show the result when the background
+        threads have it, so a slow filter does not block the window while a slider moves."""
+        self._live = True
+        try:
+            change()
+        finally:
+            self._live = False
+
+    def _process(self, raw: Frame) -> tuple[Frame, float]:
+        """Pipeline output for ``raw``: from the background cache, or computed now."""
+        if not self.pipeline.active:
+            return raw, 0.0
+        i = raw.meta.get("frame", self.index)
+        result = self.processor.get(i)
+        if result is None:
+            result = self.processor.compute(i, raw)
+        self.pipeline.record(result.stats)
+        return result.frame, result.ms
+
     def _display(self, raw: Frame) -> None:
         start = time.perf_counter()
+        self.preview_pending = None  # this draw shows the current pipeline version
         self.raw = raw
-        self.output = self.pipeline(raw, errors="skip") if self.pipeline.steps else raw
-        steps = time.perf_counter()
+        self.output, steps_ms = self._process(raw)
+        lookup = time.perf_counter()
         self._update_shown()
         self._draw()
-        self.timing = {"steps": (steps - start) * 1e3, "draw": (time.perf_counter() - steps) * 1e3}
+        self.timing = {"steps": steps_ms, "get output": (lookup - start) * 1e3,
+                       "draw": (time.perf_counter() - lookup) * 1e3}
         self.shell.push(frame=raw)
         self.fps.tick()
         self._report_errors()
@@ -478,12 +541,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pipeline_panel.update_stats()
             self.status_points.setText(f"{len(self.shown):,} points")
 
+    def _visible(self, frame: Frame | None) -> Frame | None:
+        """``frame`` without the echoes hidden under Properties."""
+        hidden = self.display.hidden_echoes
+        if frame is not None and hidden and "echo" in frame.fields:
+            return frame[~np.isin(frame.echo, list(hidden))]
+        return frame
+
     def _update_shown(self) -> None:
-        out, hidden = self.output, self.display.hidden_echoes
-        if out is not None and hidden and "echo" in out.fields:
-            self.shown = out[~np.isin(out.echo, list(hidden))]
-        else:
-            self.shown = out
+        self.shown = self._visible(self.output)
 
     def _draw(self) -> None:
         shown = self.shown
@@ -497,15 +563,26 @@ class MainWindow(QtWidgets.QMainWindow):
             echoes = sorted(set(np.unique(values).tolist()) | set(self.properties.echo_checks))
             labels = tuple(f"echo {e}" for e in echoes)
             lut = category_lut(tuple(echoes), labels)
-            categories = [(label, ECHO_COLORS[e % len(ECHO_COLORS)])
+            categories = [(label, category_color(e))
                           for e, label in zip(echoes, labels, strict=True)
                           if e not in d.hidden_echoes]
+        elif values is not None and mode in CATEGORICAL:
+            classes = np.unique(values).tolist()
+            names = self.rec.info.get("labels", {}) if self.rec is not None else {}
+            labels = tuple(f"{c} {names[str(c)]}" if str(c) in names else str(c) for c in classes)
+            lut = category_lut(tuple(classes), labels, LABEL_COLORS)
+            categories = [(label, category_color(c, LABEL_COLORS))
+                          for c, label in zip(classes, labels, strict=True)]
         elif values is not None:
             if mode not in d.clims:
                 d.clims[mode] = auto_range(values)
                 self.properties.sync()
             lut = colormap_lut(d.cmap(mode), *d.clims[mode])
         self.view.set_cloud(shown.xyz, values, lut, mode, legend=d.legend, categories=categories)
+        if self.view.split and self.raw is not None:
+            raw = self._visible(self.raw)
+            raw_values = None if values is None else color_values(raw, mode)
+            self.view.set_raw_cloud(raw.xyz, raw_values, lut)
         if d.show_removed and self.raw is not None and len(self.output) < len(self.raw):
             removed = removed_points(self.raw, self.output)
             if d.hidden_echoes and "echo" in removed.fields:
@@ -559,6 +636,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def apply_display(self) -> None:
         """Redraw after a change to ``self.display``."""
         d = self.display
+        self.view.set_split(d.split)
+        self.act["split"].setChecked(d.split)
         self.view.set_point_size(d.point_size)
         self.view.set_background(d.background)
         self.view.show_helpers(rings=d.rings, grid=d.grid, ego=d.ego, axes=d.axes)
@@ -594,6 +673,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.cloud.visible = visible
         self.view.render()
 
+    def toggle_split(self, on: bool | None = None) -> None:
+        self.display.split = (not self.display.split) if on is None else bool(on)
+        self.apply_display()
+
+    # filters and presets
+
+    def add_filter(self, key: str, name: str | None = None, values: dict | None = None) -> str:
+        """Add built-in filter ``key`` after the last step and select it; returns its name."""
+        flt = available()[key](**(values or {}))
+        name = self.pipeline.unique_name(name or flt.name)
+        self.pipeline.add(flt, name=name)
+        self.pipeline_panel.select_step(name)
+        self.docks["properties"].raise_()
+        return name
+
+    def _preset_folder(self) -> Path:
+        saved = self.settings.value("presetDir")
+        if saved and Path(saved).is_dir():
+            return Path(saved)
+        folder = scripts_dir() / "presets"
+        return folder if folder.is_dir() else examples_dir() / "presets"
+
+    def load_preset(self, path: str | None = None) -> bool:
+        path = path or preset_dialog(self, False, str(self._preset_folder()))
+        if not path:
+            return False
+        try:
+            self.pipeline.load(path, run_script=self.shell.run_file_now)
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            QtWidgets.QMessageBox.warning(self, "Load pipeline preset", f"{path}:\n\n{e}")
+            return False
+        self.settings.setValue("presetDir", str(Path(path).parent))
+        self.statusBar().showMessage(f"Loaded {len(self.pipeline)} steps from {path}", 6000)
+        if len(self.pipeline):
+            self.pipeline_panel.select_step(self.pipeline[-1].name)
+        return True
+
+    def save_preset(self, path: str | None = None) -> bool:
+        if not len(self.pipeline):
+            self.statusBar().showMessage("No steps to save", 4000)
+            return False
+        if path is None:
+            folder = self._preset_folder()
+            if folder == examples_dir() / "presets":
+                folder = scripts_dir() / "presets"  # examples ship with the package
+                folder.mkdir(parents=True, exist_ok=True)
+            path = preset_dialog(self, True, str(folder / "pipeline.yaml"))
+        if not path:
+            return False
+        try:
+            self.pipeline.save(path)
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            QtWidgets.QMessageBox.warning(self, "Save pipeline preset", str(e))
+            return False
+        self.settings.setValue("presetDir", str(Path(path).parent))
+        self.statusBar().showMessage(f"Saved {len(self.pipeline)} steps to {path}", 6000)
+        return True
+
     # layers
 
     def add_layer(self, layer: Layer) -> None:
@@ -628,8 +765,16 @@ class MainWindow(QtWidgets.QMainWindow):
     # events
 
     def _pipeline_changed(self) -> None:
+        self.processor.invalidate()
         self.pipeline_panel.rebuild()
-        self.refresh()
+        self.properties.step_editor.sync()
+        if self._live and self.pipeline.active and self.raw is not None:
+            self.preview_pending = self.index  # shown by _frame_processed
+            self.properties.step_editor.stats.setText("computing…")
+        else:
+            self.preview_pending = None
+            self.refresh()  # scripts expect view.output to be current right away
+        self.prefetch()  # (re)compute the frames around the playhead, current one first
 
     def _play_state_changed(self, playing: bool) -> None:
         self.act["play"].setIcon(theme.icon("pause" if playing else "play"))
@@ -647,6 +792,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.player_bar.seekbar.set_cached(mask)
             self.status_cache.setText(f"memory: {mask.sum()}/{len(rec)} frames, "
                                       f"{rec.cached_bytes / 2**30:.2f} GB")
+        if self.processor.version != self._processed_version:
+            self._processed_version = self.processor.version
+            mask = np.zeros(len(rec), bool)
+            if self.pipeline.active:
+                mask[[i for i in self.processor.cached() if i < len(rec)]] = True
+            self.player_bar.seekbar.set_processed(mask)
         self.status_fps.setText(f"{self.fps.value:4.1f} fps" if self.player.playing else "paused")
 
     def eventFilter(self, obj, event) -> bool:
@@ -705,7 +856,11 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.instance().removeEventFilter(self)
         sys.excepthook = self._excepthook
         self.pipeline.unsubscribe(self._pipeline_changed)
+        # threads finishing a frame after this must not signal the deleted window
+        self.processor.on_done = None
+        self.processor.close()
         if self.rec is not None:
+            self.rec.on_loaded = None
             self.rec.close()
         self.shell.shutdown()
         self.view.close()

@@ -37,11 +37,22 @@ def remove_cover_echo(f):
 pipe                            # list with points in/out and time per step
 pipe.enable("remove_cover_echo", False);  pipe.remove(...);  pipe.clear()
 view.refresh()                  # re-run after changing a variable a step reads</pre>
+<h4>Filters with parameters (sliders under Properties)</h4>
+<pre>pipe.add(lab.filters.DROR(beta=3))          # built-in: lab.filters.available()
+pipe["dror"].set(min_neighbors=3);  pipe["dror"].values;  pipe["dror"].reset()
+
+@lab.filter(radius=(0.05, 2.0), k=(1, 20))  # ranges make sliders
+def my_ror(f, radius=0.4, k=2):             # defaults come from the signature
+    ...
+pipe.save("denoise.yaml");  pipe.load("denoise.yaml")     # presets</pre>
+<p>Steps run ahead of the playhead in background threads; the green line under the seek
+bar shows the frames already processed.</p>
 <h4>Viewer</h4>
 <pre>view.goto(120); view.next(); view.prev(); view.play(); view.pause(); view.speed = 2
 view.index, view.frame, view.output (after the steps), view.shown (what is drawn)
 view.color_by("intensity", cmap="turbo", clim=(0, 100))
 view.point_size = 3;  view.camera("bev");  view.echoes = {1, 2};  view.show_removed()
+view.split()                    # raw left, after the pipeline right; view.split(False)
 @view.highlight(color="red")    # paint points on every frame, without removing them
 def weak(f): return f.intensity < 10
 view.show(points, name="mine", color="yellow")   # fixed points: Frame, (N, 3) or mask
@@ -175,6 +186,10 @@ class ViewAPI:
         """Draw the points the processing steps removed, in red."""
         self._w.display.show_removed = on
         self._w.apply_display()
+
+    def split(self, on: bool = True) -> None:
+        """Raw points in the left half, the pipeline's output in the right; one camera."""
+        self._w.toggle_split(on)
 
     # layers
 

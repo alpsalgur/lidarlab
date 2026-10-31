@@ -1,12 +1,14 @@
-"""Properties panel: how the current frame is drawn (coloring, points, echoes, scene, camera)."""
+"""Properties panel: the selected pipeline step's parameters, then how the current frame is
+drawn (coloring, points, echoes, scene, camera)."""
 
 from __future__ import annotations
 
 from PySide6 import QtCore, QtWidgets
 
 from . import theme
-from .display import COLORMAPS, SOLID
+from .display import CATEGORICAL, COLORMAPS, SOLID
 from .render_view import BACKGROUNDS, ECHO_COLORS
+from .step_editor import StepEditor
 
 CAMERA_BUTTONS = (("3D", "3d", "Chase view (1)"), ("BEV", "bev", "Bird's eye view (2)"),
                   ("Front", "front", "Driver's view (3)"), ("Side", "side", "Side view (4)"),
@@ -22,9 +24,14 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         self._syncing = False
         self.setWidgetResizable(True)
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        # rows shrink to the dock's width instead of hiding values behind a scroll bar
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(6, 0, 6, 6)
+
+        self.step_editor = StepEditor(window)
+        layout.addWidget(self.step_editor)
 
         coloring = QtWidgets.QGroupBox("Coloring")
         form = QtWidgets.QFormLayout(coloring)
@@ -57,9 +64,14 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         self.point_size.setRange(1.0, 10.0)
         self.point_size.setSingleStep(0.5)
         self.point_size.setSuffix(" px")
-        self.show_removed = QtWidgets.QCheckBox("Show points removed by the pipeline (red)")
+        self.show_removed = QtWidgets.QCheckBox("Show removed points (red)")
+        self.show_removed.setToolTip("Draw the points the pipeline removed, in red")
+        self.split = QtWidgets.QCheckBox("Split view: raw | pipeline")
+        self.split.setToolTip("Raw points on the left, the pipeline's output on the right, "
+                              "one camera (Ctrl+T)")
         form.addRow("Size", self.point_size)
         form.addRow("", self.show_removed)
+        form.addRow("", self.split)
         layout.addWidget(points)
 
         self.echo_box = QtWidgets.QGroupBox("Echoes")
@@ -83,7 +95,11 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         camera = QtWidgets.QGroupBox("Camera")
         row = QtWidgets.QHBoxLayout(camera)
         for label, preset, tip in CAMERA_BUTTONS:
-            button = QtWidgets.QPushButton(label)
+            # tool buttons shrink to their text; five push buttons would need ~460 px
+            button = QtWidgets.QToolButton()
+            button.setText(label)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                 QtWidgets.QSizePolicy.Policy.Fixed)
             button.setToolTip(tip)
             button.clicked.connect(lambda _=False, p=preset: self.w.set_camera(p))
             row.addWidget(button)
@@ -95,7 +111,8 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         self.cmap.currentTextChanged.connect(self._changed)
         self.vmin.valueChanged.connect(self._range_changed)
         self.vmax.valueChanged.connect(self._range_changed)
-        for box in (self.legend, self.show_removed, self.rings, self.grid, self.ego, self.axes):
+        for box in (self.legend, self.show_removed, self.split, self.rings, self.grid, self.ego,
+                    self.axes):
             box.toggled.connect(self._changed)
         self.point_size.valueChanged.connect(self._changed)
         self.background.currentTextChanged.connect(self._changed)
@@ -108,6 +125,7 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         spin.setDecimals(3)
         spin.setKeyboardTracking(False)
         spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        spin.setMinimumWidth(60)  # the ±1e9 range would ask for ~130 px and widen the panel
         return spin
 
     def set_run(self, modes: list[str], echoes: list[int], labels: dict) -> None:
@@ -139,12 +157,13 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         lo, hi = d.clims.get(d.color_by, (0.0, 1.0))
         self.vmin.setValue(lo)
         self.vmax.setValue(hi)
-        ranged = d.color_by not in ("echo", SOLID)
+        ranged = d.color_by not in (*CATEGORICAL, SOLID)
         for widget in (self.cmap, self.vmin, self.vmax):
             widget.setEnabled(ranged)
         self.legend.setChecked(d.legend)
         self.point_size.setValue(d.point_size)
         self.show_removed.setChecked(d.show_removed)
+        self.split.setChecked(d.split)
         for e, box in self.echo_checks.items():
             box.setChecked(e not in d.hidden_echoes)
         self.rings.setChecked(d.rings)
@@ -162,7 +181,7 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         if self._syncing:
             return
         d = self.w.display
-        if d.color_by not in ("echo", SOLID):
+        if d.color_by not in (*CATEGORICAL, SOLID):
             d.clims[d.color_by] = (self.vmin.value(), self.vmax.value())
             self.w.apply_display()
 
@@ -170,11 +189,12 @@ class PropertiesPanel(QtWidgets.QScrollArea):
         if self._syncing:
             return
         d = self.w.display
-        if d.color_by not in ("echo", SOLID):
+        if d.color_by not in (*CATEGORICAL, SOLID):
             d.cmaps[d.color_by] = self.cmap.currentText()
         d.legend = self.legend.isChecked()
         d.point_size = self.point_size.value()
         d.show_removed = self.show_removed.isChecked()
+        d.split = self.split.isChecked()
         d.hidden_echoes = {e for e, box in self.echo_checks.items() if not box.isChecked()}
         d.rings, d.grid = self.rings.isChecked(), self.grid.isChecked()
         d.ego, d.axes = self.ego.isChecked(), self.axes.isChecked()
