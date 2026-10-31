@@ -28,6 +28,7 @@ from .display import (
     removed_points,
 )
 from .editor import ScriptEditor
+from .export_dialog import ExportDialog, ExportJob
 from .info_panel import InfoPanel
 from .paths import data_dir, examples_dir, scripts_dir
 from .pipeline_panel import PipelinePanel
@@ -89,6 +90,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.processor.on_done = self.frameProcessed.emit
         self.preview_pending: int | None = None  # frame waiting for its background result
         self._live = False  # set while a slider applies a change
+        self.export_job: ExportJob | None = None
         self.display = Display()
         self.layers: dict[str, Layer] = {}
         self.timing: dict[str, float] = {}
@@ -178,6 +180,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                icon="add"),
             "export": action("&Export Current Frame…", self.export_frame, "Ctrl+E", "save",
                              "Save the current frame after the processing steps as .npz"),
+            "export_run": action("Export &Test Run…", self.export_run_dialog, "Ctrl+Shift+E",
+                                 tip="Run the steps over all (or some) frames and write them"),
             "screenshot": action("Save View &Screenshot…", self.save_screenshot, "F12", "camera"),
             "quit": action("E&xit", self.close, "Ctrl+Q"),
             "play": action("Play / Pause\tSpace", self.player.toggle, icon="play",
@@ -262,6 +266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file.addAction(a["add_root"])
         file.addSeparator()
         file.addAction(a["export"])
+        file.addAction(a["export_run"])
         file.addAction(a["screenshot"])
         file.addSeparator()
         file.addAction(a["quit"])
@@ -848,6 +853,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.editor.maybe_save_all():
             event.ignore()
             return
+        if self.export_job is not None and not self.export_job.done:
+            button = QtWidgets.QMessageBox.StandardButton
+            answer = QtWidgets.QMessageBox.question(
+                self, "Export running", "An export is still running. Stop it and quit? "
+                "Frames written so far stay.", button.Yes | button.No)
+            if answer != button.Yes:
+                event.ignore()
+                return
+            self.export_job.cancel()
+            self.export_job.wait(60)  # frames in progress finish, the rest are skipped
         self.player.pause()
         self._poll.stop()
         self.settings.setValue("window/geometry", self.saveGeometry())
@@ -879,6 +894,72 @@ class MainWindow(QtWidgets.QMainWindow):
             write_frame(self.output, path)
             self.settings.setValue("exportDir", str(Path(path).parent))
             self.statusBar().showMessage(f"Saved {len(self.output):,} points to {path}", 6000)
+
+    def export_run_dialog(self) -> None:
+        if self.rec is None:
+            return
+        if self.export_job is not None and not self.export_job.done:
+            self.statusBar().showMessage("An export is still running", 4000)
+            return
+        dialog = ExportDialog(self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.start_export(**dialog.values())
+
+    def start_export(self, out_dir, frames=None, fmt: str = "npz", workers: int | None = None,
+                     compress: bool = True, overwrite: bool = False,
+                     interactive: bool = True) -> ExportJob:
+        """Export the open test run through a copy of the current steps, in the background.
+        ``interactive`` shows a progress window and the result."""
+        job = ExportJob(self.rec, out_dir, self.pipeline.snapshot(), frames, fmt, workers,
+                        compress, overwrite, parent=self)
+        self.export_job = job
+        progress = None
+        if interactive:
+            progress = QtWidgets.QProgressDialog(f"Exporting {self.rec.name}…", "Cancel", 0, 1,
+                                                 self)
+            progress.setWindowTitle("Export")
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
+            progress.canceled.connect(job.cancel)
+
+            def show(done: int, total: int) -> None:
+                progress.setMaximum(total)
+                progress.setValue(done)
+
+            job.progress.connect(show)
+        job.progress.connect(lambda done, total: self.statusBar().showMessage(
+            f"Exporting: {done}/{total} frames", 2000))
+        job.finished.connect(lambda result: self._export_finished(job, result, progress))
+        job.start()
+        return job
+
+    def _export_finished(self, job: ExportJob, result, progress) -> None:
+        if progress is not None:
+            progress.close()
+        if isinstance(result, Exception):
+            self.statusBar().showMessage(f"Export failed: {result}", 8000)
+            if progress is not None:
+                QtWidgets.QMessageBox.warning(self, "Export", f"Export failed:\n\n{result}")
+            return
+        self.runs_panel.scan()  # exports under data/ show up as test runs
+        self.statusBar().showMessage(result.summary(), 10000)
+        if progress is None:
+            return
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Export")
+        box.setText(result.summary())
+        if result.failed:
+            box.setInformativeText("\n".join(f"frame {r.index}: {r.error}"
+                                             for r in result.failed[:5]))
+        open_button = None
+        if job.fmt == "npz" and result.written:
+            open_button = box.addButton("Open Exported Run",
+                                        QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QtWidgets.QMessageBox.StandardButton.Close)
+        box.exec()
+        if open_button is not None and box.clickedButton() is open_button:
+            self.open_run(str(job.out_dir))
 
     def save_screenshot(self) -> None:
         name = f"{self.rec.name}_frame{self.index:06d}.png" if self.rec else "view.png"

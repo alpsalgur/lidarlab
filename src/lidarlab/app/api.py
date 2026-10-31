@@ -53,6 +53,8 @@ view.index, view.frame, view.output (after the steps), view.shown (what is drawn
 view.color_by("intensity", cmap="turbo", clim=(0, 100))
 view.point_size = 3;  view.camera("bev");  view.echoes = {1, 2};  view.show_removed()
 view.split()                    # raw left, after the pipeline right; view.split(False)
+job = view.export("data/exports/clean", frames=range(100, 200))   # in the background
+job.done, job.report.summary()  # lab.export_run(rec, "out", pipe) does the same, blocking
 @view.highlight(color="red")    # paint points on every frame, without removing them
 def weak(f): return f.intensity < 10
 view.show(points, name="mine", color="yellow")   # fixed points: Frame, (N, 3) or mask
@@ -190,6 +192,17 @@ class ViewAPI:
     def split(self, on: bool = True) -> None:
         """Raw points in the left half, the pipeline's output in the right; one camera."""
         self._w.toggle_split(on)
+
+    def export(self, out_dir=None, frames=None, fmt: str = "npz", workers: int | None = None,
+               compress: bool = True, overwrite: bool = False):
+        """Run the current steps over the test run (or ``frames``, e.g. ``range(100, 200)``)
+        and write the frames to ``out_dir`` in the background, like File > Export Test Run.
+        Returns the job: ``job.done``, ``job.report.summary()``, ``job.cancel()``. Without
+        ``out_dir`` a new folder under data/exports is used."""
+        from .export_dialog import default_output
+
+        out = Path(out_dir) if out_dir else default_output(self._w.rec.name)
+        return self._w.start_export(out, frames, fmt, workers, compress, overwrite)
 
     # layers
 
