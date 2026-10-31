@@ -16,6 +16,9 @@ noise reduction, your own processing steps.
 - Export: run the pipeline over a whole test run (or a range) from the app, in the background,
   or with `lidarlab run` on the command line; both write the same files (npz in the source's
   layout, or PLY/PCD)
+- Analysis: pick points, measure distances, select a region that stays fixed to the sensor
+  across frames, field histograms, a per-frame metric strip over the whole run, bookmarks with
+  notes, and workspaces to come back to an analysis
 - Pipeline presets in YAML, converters for KITTI, Boreas (snow) and WADS (labeled snow), and a
   synthetic multi-echo recording with rain, spray and per-point ground truth
 
@@ -42,14 +45,16 @@ default layout.
 
 | Area | Contents |
 |---|---|
-| Left | **Test Runs**: the recordings under `data/` (double-click opens, `+` adds another folder) · **Pipeline Browser**: the test run, its processing steps and layers; `+ Filter` adds a built-in filter, the folder and disk icons load and save presets; check boxes switch steps on and off, the columns show the points left after each step and its time |
-| Center | 3D view and player bar. The light gray part of the seek bar marks frames in memory, the green line under it frames the pipeline has processed |
-| Right | **Properties**: the selected step's parameters, coloring, point size, echo visibility, split view, scene, camera · **Information**: file, time, pose, points per echo, bounds, arrays, timings |
+| Left | **Test Runs**: the recordings under `data/` (double-click opens, `+` adds another folder) · **Bookmarks** · **Pipeline Browser**: the test run, its processing steps and layers; `+ Filter` adds a built-in filter, the folder and disk icons load and save presets; check boxes switch steps on and off, the columns show the points left after each step and its time |
+| Center | 3D view, metric strip and player bar. The light gray part of the seek bar marks frames in memory, the green line under it frames the pipeline has processed, yellow marks bookmarks |
+| Right | **Properties**: the selected step's parameters, coloring, point size, echo visibility, split view, scene, camera · **Information**: picked point, measurement, selection, file, time, pose, points per echo, bounds, arrays, timings · **Inspector**: histogram of a field |
 | Bottom | **Python Shell** (IPython in the viewer's process) · **Script Editor** |
 
 Keyboard: Space play/pause · ←/→ one frame (Shift: 10) · Home/End · 1–4 cameras (3D, bird's eye,
-driver, side) · R fit · C next color field · +/− point size · Ctrl+T split view · F1 scripting
-reference. While typing in the shell, the editor or a field, these keys type as usual.
+driver, side) · R fit · C next color field · +/− point size · Ctrl+T split view · N/P/M/S tools
+(navigate, pick, measure, select) · Esc clear · B bookmark · [ and ] previous/next bookmark ·
+F1 scripting reference. While typing in the shell, the editor or a field, these keys type as
+usual.
 
 ## Filters
 
@@ -72,6 +77,20 @@ one camera; "Show removed points" draws what the pipeline removed in red. A read
 Filters → Load Pipeline Preset → `examples/presets/rain_denoise.yaml` (cover echo + weak first
 echoes + DROR). On the labeled synthetic run it removes 94–96 % of the rain and spray, and
 93–94 % of the points it removes are noise.
+
+## Analysis
+
+| Tool | How |
+|---|---|
+| Pick (P) | Click a point: all its values (fields, range, azimuth, elevation, source index) appear under Information and in `view.picked`. Dragging still turns the camera |
+| Measure (M) | Click two points: distance, horizontal distance and height difference, drawn in the view and in `view.measurement` |
+| Box select (S) | Drag a box: the points inside turn pink; count, bounds and means under Information, the points in `view.selection`. The box keeps the camera it was drawn with, so it stays fixed relative to the sensor on every frame (e.g. the spray region behind a truck) |
+| Inspector | Histogram of any field: as loaded (gray) and after the pipeline (blue), so what the pipeline removes shows as gray; log scale, only the selection |
+| Metric strip | Above the player bar, in line with the seek bar: one value per frame over the whole run (points, points after the pipeline, removed %, cover echo share, echo 2 share, mean intensity, roll, pitch, labelled noise, noise left after the pipeline, points in the selection). Frames shown while playing are measured right away; **Compute all** measures every frame in the background. Click to go to a frame |
+| Bookmarks (B) | A note on the current frame; `[` and `]` jump between them. Kept in the test run's folder as `bookmarks.json` (elsewhere when the folder is read-only) |
+| Workspaces | File → Save/Open Workspace: test run, frame, camera, display settings, pipeline, histogram field and metric in one `.lidarlab` file |
+
+Esc clears the pick, the measurement and the selection.
 
 ## Export
 
@@ -124,6 +143,9 @@ pipe.save("denoise.yaml")           # preset: steps, order, values
 view.split()                        # raw | after the pipeline
 view.output.save("out.npz")         # the frame after the steps, in the source layout
 job = view.export("data/exports/clean", frames=range(100, 200))   # in the background
+view.selection.intensity.mean()     # points in the box selection (S), on the current frame
+view.metrics["removed_pct"]         # one value per frame; view.compute_metrics() fills it
+view.bookmark("spray starts")       # note on the current frame
 ```
 
 Examples: Script Editor → Examples (exploring a frame, cover echo, rain echoes, bright points,
@@ -189,7 +211,7 @@ restores the layout it was read from; in echo-axis files removed points become `
 ```powershell
 venv\Scripts\python -m pytest
 venv\Scripts\python -m ruff check .
-# drives the window without a user (a window opens for about 1.5 minutes) and writes
-# screenshots to data\previews
+# drives the window without a user (a window opens for about 2 minutes; leave mouse and
+# keyboard alone meanwhile) and writes screenshots to data\previews
 venv\Scripts\python tools\ui_selftest.py data\synthetic\city_rain data\kitti\2011_09_26_drive_0011
 ```
