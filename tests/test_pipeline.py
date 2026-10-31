@@ -1,7 +1,10 @@
+import textwrap
+
 import numpy as np
 import pytest
 
 from lidarlab import Frame, Pipeline, StepError, step
+from lidarlab.core import filters as F
 
 
 def frame() -> Frame:
@@ -80,3 +83,68 @@ def test_decorator_and_listeners():
     p.enable("keep_first", False)
     assert versions == [1, 2] and not p.active
     assert p["keep_first"].source[1] > 0  # defined in this file
+
+
+def test_preset_round_trip_with_filters_and_script_steps(tmp_path):
+    script = tmp_path / "my_steps.py"
+    script.write_text(textwrap.dedent('''
+        import lidarlab as lab
+
+        @lab.filter(limit=(0, 10))
+        def low_echo(f, limit=1):
+            return f.echo <= limit
+
+        @lab.step
+        def everything(f):
+            return None
+    '''))
+    p = Pipeline()
+    p.add(F.DROR(beta=4.5))
+    p.load_dict({"steps": [{"script": str(script), "name": "low_echo"},
+                           {"script": str(script), "name": "everything"}]})
+    assert [s.name for s in p] == ["low_echo", "everything"]  # load replaces the steps
+    p.add(F.EchoSelect(mode="only echo n", n=2), name="second")
+    p.move("second", -2)
+    p.set("low_echo", limit=2)
+    p.enable("everything", False)
+    path = p.save(tmp_path / "preset.yaml")
+
+    q = Pipeline()
+    versions = []
+    q.subscribe(lambda: versions.append(q.version))
+    q.load(path)
+    assert versions == [q.version]  # one notification for the whole load
+    assert [s.name for s in q] == ["second", "low_echo", "everything"]
+    assert q["second"].values == {"mode": "only echo n", "n": 2, "cover": 0}
+    assert q["low_echo"].values == {"limit": 2}
+    assert not q["everything"].enabled
+    assert len(q(frame())) == 1  # only echo 2 is left
+    assert "# LidarLab pipeline preset" in path.read_text()
+
+
+def test_steps_defined_in_the_shell_cannot_be_saved():
+    p = Pipeline()
+    exec("def from_shell(f):\n    return None", ns := {})  # no source file, like the shell
+    p.add(ns["from_shell"])
+    with pytest.raises(ValueError, match="defined in the shell"):
+        p.to_dict()
+
+
+def test_preset_errors():
+    p = Pipeline()
+    with pytest.raises(ValueError, match="not a LidarLab pipeline preset"):
+        p.load_dict({"name": "x"})
+    with pytest.raises(ValueError, match="unknown filter"):
+        p.load_dict({"steps": [{"filter": "magic"}]})
+
+
+def test_filter_steps_show_their_parameters():
+    p = Pipeline()
+    p.add(F.DROR)  # a class is instantiated with defaults
+    s = p["dror"]
+    assert s.values["beta"] == 3.0 and "beta" in s.params
+    assert "Charron" in s.description
+    assert s.source[0].endswith("filters.py")
+    assert p.unique_name("dror") == "dror_2" and p.unique_name("sor") == "sor"
+    with pytest.raises(TypeError, match="plain function"):
+        p.add(lambda f: None, name="plain").set(x=1)
