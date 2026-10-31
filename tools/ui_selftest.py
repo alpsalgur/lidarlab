@@ -8,6 +8,8 @@ A window appears for about a minute.
 """
 
 import argparse
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -222,6 +224,29 @@ def main() -> int:
     jumps = w.pipeline["ring_jumps"]
     checks["example filter has sliders"] = set(jumps.params) == {"max_jump", "max_range", "echo"}
     numbers["ring_jumps on this frame"] = f"{jumps.n_in:,} -> {jumps.n_out:,} in {jumps.ms:.0f} ms"
+
+    # export: the app (in the background) and the command line write the same frames
+    gui_out, cli_out = args.out / "selftest_export_app", args.out / "selftest_export_cli"
+    for folder in (gui_out, cli_out):
+        shutil.rmtree(folder, ignore_errors=True)
+    job = w.start_export(gui_out, frames=range(140, 160), interactive=False)
+    checks["export runs in the background"] = not job.done
+    checks["export finishes"] = wait(lambda: job.done, timeout=300) and job.error is None
+    numbers["export of 20 frames, app"] = job.report.summary() if job.report else str(job.error)
+    preset_file = args.out / "selftest_export_preset.yaml"
+    w.pipeline.save(preset_file)  # includes ring_jumps, a step defined by a script
+    start = time.perf_counter()
+    cli = subprocess.run([sys.executable, "-m", "lidarlab", "run", str(args.run), str(cli_out),
+                          "-p", str(preset_file), "--frames", "140:160"],
+                         capture_output=True, text=True)
+    numbers["export of 20 frames, command line"] = (
+        f"exit code {cli.returncode} in {time.perf_counter() - start:.1f} s (with start-up)")
+    same = cli.returncode == 0 and len(list(gui_out.glob("*.npz"))) == 20
+    for path in gui_out.glob("*.npz"):
+        with np.load(path) as a, np.load(cli_out / path.name) as b:
+            same &= a.files == b.files and all(
+                np.array_equal(a[k], b[k], equal_nan=True) for k in a.files)
+    checks["app and command line write the same frames"] = same
 
     # a second test run (other layout)
     if args.other:
