@@ -54,7 +54,16 @@ view.color_by("intensity", cmap="turbo", clim=(0, 100))
 view.point_size = 3;  view.camera("bev");  view.echoes = {1, 2};  view.show_removed()
 view.split()                    # raw left, after the pipeline right; view.split(False)
 job = view.export("data/exports/clean", frames=range(100, 200))   # in the background
-job.done, job.report.summary()  # lab.export_run(rec, "out", pipe) does the same, blocking
+job.done, job.report.summary()  # lab.export_run(rec, "out", pipe) does the same, blocking</pre>
+<h4>Analysis</h4>
+<pre>view.tool("pick")               # also "measure", "select", "navigate" (keys P, M, S, N; Esc)
+view.picked                     # all values of the picked point
+view.measurement                # distance, horizontal, dz of the last two clicked points
+view.selection                  # points of view.shown inside the box (S, then drag)
+view.selection.intensity.mean() # the box stays fixed to the sensor: same region every frame
+view.bookmark("spray starts");  view.bookmarks      # B adds one, [ and ] jump
+view.metrics["removed_pct"]     # one value per frame (NaN until measured); view.compute_metrics()
+view.save_workspace("analysis.lidarlab");  view.open_workspace("analysis.lidarlab")
 @view.highlight(color="red")    # paint points on every frame, without removing them
 def weak(f): return f.intensity < 10
 view.show(points, name="mine", color="yellow")   # fixed points: Frame, (N, 3) or mask
@@ -192,6 +201,60 @@ class ViewAPI:
     def split(self, on: bool = True) -> None:
         """Raw points in the left half, the pipeline's output in the right; one camera."""
         self._w.toggle_split(on)
+
+    # analysis
+
+    def tool(self, name: str = "navigate") -> None:
+        """Mouse tool in the 3D view: "navigate", "pick", "measure" or "select"."""
+        self._w.set_tool(name)
+
+    @property
+    def picked(self) -> dict | None:
+        """Values of the point picked last (tool "pick")."""
+        return self._w.picked
+
+    @property
+    def measurement(self) -> dict | None:
+        """Distance between the last two points clicked with the "measure" tool."""
+        return self._w.measurement
+
+    @property
+    def selection(self) -> Frame | None:
+        """Points of ``view.shown`` inside the box selection (tool "select"); the box keeps
+        its place relative to the sensor, so this follows the frames."""
+        return self._w.selected
+
+    def clear_selection(self) -> None:
+        """Clear the picked point, the measurement and the box selection."""
+        self._w.clear_tools()
+
+    def bookmark(self, note: str = "", frame: int | None = None) -> None:
+        """Bookmark the current frame (or ``frame``) with ``note``."""
+        self._w.add_bookmark(note, frame)
+
+    @property
+    def bookmarks(self) -> list[tuple[int, str]]:
+        b = self._w.bookmarks
+        return [(f, b.note(f)) for f in b.frames()] if b is not None else []
+
+    @property
+    def metrics(self) -> dict[str, np.ndarray]:
+        """Per-frame metrics of the test run (NaN until measured): play, or compute_metrics()."""
+        return dict(self._w.metrics.values) if self._w.metrics is not None else {}
+
+    def compute_metrics(self) -> None:
+        """Measure every frame in the background; the metric strip fills in."""
+        self._w.compute_metrics()
+
+    def save_workspace(self, path) -> Path:
+        from . import workspace
+
+        return workspace.save(self._w, path)
+
+    def open_workspace(self, path) -> None:
+        from . import workspace
+
+        workspace.load(self._w, path)
 
     def export(self, out_dir=None, frames=None, fmt: str = "npz", workers: int | None = None,
                compress: bool = True, overwrite: bool = False):

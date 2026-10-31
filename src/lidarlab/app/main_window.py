@@ -12,10 +12,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import lidarlab
 from lidarlab import Frame, Processor, Recording, write_frame
+from lidarlab.core.bookmarks import Bookmarks
 from lidarlab.core.filters import available
+from lidarlab.core.metrics import PIPELINE_METRICS, MetricStore, frame_metrics
 
-from . import theme
+from . import theme, workspace
 from .api import HELP_HTML, ViewAPI
+from .bookmarks_panel import BookmarksPanel
 from .console import PythonShell
 from .display import (
     CATEGORICAL,
@@ -30,7 +33,10 @@ from .display import (
 from .editor import ScriptEditor
 from .export_dialog import ExportDialog, ExportJob
 from .info_panel import InfoPanel
-from .paths import data_dir, examples_dir, scripts_dir
+from .inspector import InspectorPanel
+from .metrics_strip import MetricsJob, MetricsStrip
+from .paths import data_dir, examples_dir, log_dir, scripts_dir
+from .picking import BoxSelection, describe_point, screen_view
 from .pipeline_panel import PipelinePanel
 from .player import Layer, Player, Rate
 from .properties_panel import PropertiesPanel
@@ -41,7 +47,10 @@ from .timeline import SPEEDS, PlayerBar
 
 Qt = QtCore.Qt
 REMOVED = "__removed__"  # view layer showing the points the steps removed
+PICKED, MEASURED, SELECTION = "__picked__", "__measured__", "__selection__"  # tool layers
+PICK_COLOR, SELECTION_COLOR = "#ffffff", "#ff4fd8"  # pink: not in the usual colormaps
 MAX_RECENT = 8
+LAYOUT_KEY = "window/state/v2"  # v1 layouts lack the Bookmarks and Inspector docks
 # keys typed into these widgets stay with them instead of driving playback
 TEXT_INPUTS = (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit,
                QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox, QtWidgets.QAbstractItemView)
@@ -100,6 +109,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_info = 0.0
         self._cache_version = -1
         self._processed_version = -1
+        self._metrics_version = -1
+        # analysis tools: picked point, measurement, box selection, bookmarks, run metrics
+        self.picked: dict | None = None
+        self.measure_points: list[np.ndarray] = []
+        self.measurement: dict | None = None
+        self.selection: BoxSelection | None = None
+        self.selected: Frame | None = None  # the shown frame's points inside the selection
+        self.bookmarks: Bookmarks | None = None
+        self.metrics: MetricStore | None = None
+        self.metrics_job: MetricsJob | None = None
 
         self.view = RenderView(self)
         self.player = Player(self)
@@ -107,6 +126,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pipeline_panel = PipelinePanel(self)
         self.properties = PropertiesPanel(self)
         self.info = InfoPanel()
+        self.inspector = InspectorPanel(self)
+        self.bookmarks_panel = BookmarksPanel(self)
         self.api = ViewAPI(self)
         namespace = {"lab": lidarlab, "np": np, "view": self.api, "pipe": self.pipeline,
                      "rec": None, "frame": None}
@@ -114,11 +135,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor = ScriptEditor(lambda: self.shell.namespace, scripts_dir())
         self._make_actions()
         self.player_bar = PlayerBar(self.act, self)
+        self.metrics_strip = MetricsStrip(self.player_bar.seekbar)
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.view, 1)
+        layout.addWidget(self.metrics_strip)
         layout.addWidget(self.player_bar)
         self.setCentralWidget(central)
         self._make_docks()
@@ -131,6 +154,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor.runCode.connect(self.shell.execute)
         self.player_bar.seek.connect(self.show_frame)
         self.player_bar.speedChanged.connect(self.player.set_speed)
+        self.metrics_strip.seek.connect(self.show_frame)
+        self.metrics_strip.computeRequested.connect(self.compute_metrics)
+        self.metrics_strip.metric_box.currentIndexChanged.connect(
+            lambda _: self.settings.setValue("metric", self.metrics_strip.key))
+        self.view.pointClicked.connect(self._point_clicked)
+        self.view.boxDrawn.connect(self._box_drawn)
         self.player.stateChanged.connect(self._play_state_changed)
         self.frameLoaded.connect(self._frame_loaded)
         self.frameProcessed.connect(self._frame_processed)
@@ -208,6 +237,18 @@ class MainWindow(QtWidgets.QMainWindow):
                             checkable=True),
             "load_preset": action("&Load Pipeline Preset…", self.load_preset, icon="open"),
             "save_preset": action("&Save Pipeline Preset…", self.save_preset, icon="save"),
+            "open_workspace": action("Open &Workspace…", self.open_workspace_dialog),
+            "save_workspace": action("Save Wor&kspace…", self.save_workspace_dialog),
+            "bookmark": action("Bookmark Frame…\tB", lambda: self.add_bookmark(),
+                               icon="bookmark", tip="Add a note to the current frame (B)"),
+            "bookmark_prev": action("Previous Bookmark\t[", lambda: self.jump_bookmark(-1)),
+            "bookmark_next": action("Next Bookmark\t]", lambda: self.jump_bookmark(1)),
+            "compute_metrics": action("Compute Metrics for All Frames", self.compute_metrics,
+                                      tip="Fill the metric strip for every frame"),
+            "metrics_strip": action("Metric Strip", self._toggle_metrics_strip, checkable=True,
+                                    tip="Per-frame metric above the player bar"),
+            "clear_tools": action("Clear Pick, Measurement and Selection\tEsc",
+                                  self.clear_tools),
             "clear_layers": action("Remove Highlights and Overlays", self.clear_layers),
             "reset_layout": action("Reset Layout", self.reset_layout),
             "help_api": action("&Scripting Reference", self.show_scripting_help, "F1"),
@@ -221,7 +262,21 @@ class MainWindow(QtWidgets.QMainWindow):
         for preset, text, short, tip in cameras:
             self.act[f"cam_{preset}"] = action(text, lambda _=False, p=preset: self.set_camera(p),
                                                tip=tip, icon_text=short)
+        tools = (("navigate", "Navigate\tN", "navigate", "Turn, pan and zoom the camera (N)"),
+                 ("pick", "Pick Point\tP", "pick", "Click a point to see all its values (P)"),
+                 ("measure", "Measure Distance\tM", "measure",
+                  "Click two points to measure the distance between them (M)"),
+                 ("select", "Box Select\tS", "select",
+                  "Drag a box to select points; it stays fixed to the sensor across frames (S)"))
+        group = QtGui.QActionGroup(self)
+        for tool, text, icon, tip in tools:
+            a = action(text, lambda _=False, t=tool: self.set_tool(t), icon=icon, tip=tip,
+                       checkable=True)
+            group.addAction(a)
+            self.act[f"tool_{tool}"] = a
+        self.act["tool_navigate"].setChecked(True)
         self.act["loop"].setChecked(True)
+        self.act["metrics_strip"].setChecked(True)
 
     def _make_docks(self) -> None:
         def dock(title, widget, name):
@@ -233,21 +288,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.docks = {
             "runs": dock("Test Runs", self.runs_panel, "TestRunsDock"),
             "pipeline": dock("Pipeline Browser", self.pipeline_panel, "PipelineBrowserDock"),
+            "bookmarks": dock("Bookmarks", self.bookmarks_panel, "BookmarksDock"),
             "properties": dock("Properties", self.properties, "PropertiesDock"),
             "info": dock("Information", self.info, "InformationDock"),
+            "inspector": dock("Inspector", self.inspector, "InspectorDock"),
             "shell": dock("Python Shell", self.shell, "PythonShellDock"),
             "editor": dock("Script Editor", self.editor, "ScriptEditorDock"),
         }
+        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
+        self._place_docks()
+        self.docks["inspector"].visibilityChanged.connect(
+            lambda on: on and self.inspector.refresh())
+        # The tabs (Test Runs | Bookmarks, Information | Inspector) come after the first show:
+        # docks tabified before the window is shown, or reset with restoreState, leave a stray
+        # copy of their tab bar on screen.
+        self._needs_default_tabs = True
+
+    def _place_docks(self) -> None:
         d, area = self.docks, Qt.DockWidgetArea
-        self.setCorner(Qt.Corner.BottomLeftCorner, area.LeftDockWidgetArea)
-        self.setCorner(Qt.Corner.BottomRightCorner, area.RightDockWidgetArea)
         self.addDockWidget(area.LeftDockWidgetArea, d["runs"])
         self.splitDockWidget(d["runs"], d["pipeline"], Qt.Orientation.Vertical)
+        self.splitDockWidget(d["pipeline"], d["bookmarks"], Qt.Orientation.Vertical)
         self.addDockWidget(area.RightDockWidgetArea, d["properties"])
         self.splitDockWidget(d["properties"], d["info"], Qt.Orientation.Vertical)
+        self.splitDockWidget(d["info"], d["inspector"], Qt.Orientation.Vertical)
         self.addDockWidget(area.BottomDockWidgetArea, d["shell"])
         self.splitDockWidget(d["shell"], d["editor"], Qt.Orientation.Horizontal)
-        self._default_state = self.saveState()
+
+    def _default_tabs(self) -> None:
+        d = self.docks
+        self.tabifyDockWidget(d["runs"], d["bookmarks"])
+        self.tabifyDockWidget(d["info"], d["inspector"])
+        d["runs"].raise_()
+        d["info"].raise_()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if self._needs_default_tabs:
+            self._needs_default_tabs = False
+            self._default_tabs()
 
     def _default_sizes(self) -> None:
         d = self.docks
@@ -269,12 +349,16 @@ class MainWindow(QtWidgets.QMainWindow):
         file.addAction(a["export_run"])
         file.addAction(a["screenshot"])
         file.addSeparator()
+        file.addAction(a["open_workspace"])
+        file.addAction(a["save_workspace"])
+        file.addSeparator()
         file.addAction(a["quit"])
         self._rebuild_recent()
 
         view = bar.addMenu("&View")
         for dock in self.docks.values():
             view.addAction(dock.toggleViewAction())
+        view.addAction(a["metrics_strip"])
         view.addSeparator()
         camera = view.addMenu("Camera")
         for name in ("cam_3d", "cam_bev", "cam_front", "cam_side", "cam_fit"):
@@ -296,6 +380,16 @@ class MainWindow(QtWidgets.QMainWindow):
             group.addAction(item)
         play.addSeparator()
         play.addAction(a["cache_all"])
+        play.addSeparator()
+        for name in ("bookmark", "bookmark_prev", "bookmark_next"):
+            play.addAction(a[name])
+
+        tools = bar.addMenu("&Tools")
+        for name in ("tool_navigate", "tool_pick", "tool_measure", "tool_select"):
+            tools.addAction(a[name])
+        tools.addAction(a["clear_tools"])
+        tools.addSeparator()
+        tools.addAction(a["compute_metrics"])
 
         filters = bar.addMenu("F&ilters")
         filters.addMenu(filter_menu(self, self.add_filter))
@@ -345,6 +439,10 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addAction(a["cam_fit"])
         bar.addAction(a["split"])
         bar.addSeparator()
+        for name in ("tool_navigate", "tool_pick", "tool_measure", "tool_select"):
+            bar.addAction(a[name])
+        bar.addAction(a["bookmark"])
+        bar.addSeparator()
         bar.addAction(self.editor.actions_["run"])
         bar.addAction(a["cache_all"])
 
@@ -358,18 +456,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _restore(self, restore_layout: bool) -> None:
         geometry = self.settings.value("window/geometry")
-        state = self.settings.value("window/state")
+        state = self.settings.value(LAYOUT_KEY)
         if restore_layout and geometry is not None:
             self.restoreGeometry(geometry)
-        if not (restore_layout and state is not None and self.restoreState(state)):
+        if restore_layout and state is not None and self.restoreState(state):
+            self._needs_default_tabs = False  # the saved layout has its own tabs
+        else:
             QtCore.QTimer.singleShot(0, self._default_sizes)
         self.editor.restore_session(self.settings)
+        k = self.metrics_strip.metric_box.findData(self.settings.value("metric"))
+        if k >= 0:
+            self.metrics_strip.metric_box.setCurrentIndex(k)
+        visible = self.settings.value("metricStrip", True) not in (False, "false")
+        self.act["metrics_strip"].setChecked(visible)
+        self.metrics_strip.setVisible(visible)
 
     def reset_layout(self) -> None:
+        """Default dock layout, rebuilt from scratch (restoreState leaves stray tab bars)."""
         for dock in self.docks.values():
             dock.setFloating(False)
+            self.removeDockWidget(dock)
+        self._place_docks()
+        for dock in self.docks.values():
             dock.show()
-        self.restoreState(self._default_state)
+        self._default_tabs()
         QtCore.QTimer.singleShot(0, self._default_sizes)
 
     # test runs
@@ -392,12 +502,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.pause()
         if self.rec is not None:
             self.rec.close()
+        self._stop_metrics_job()
         self.rec = rec
         rec.on_loaded = self.frameLoaded.emit
         self.processor.set_recording(rec)
         self.index, self._wanted = 0, None
         self.raw = self.output = self.shown = None
         self._reported.clear()
+        self.clear_tools()
+        self.metrics = MetricStore(len(rec))
+        self.metrics_strip.set_store(self.metrics)
+        self.bookmarks = Bookmarks(rec.path, fallback_dir=log_dir() / "bookmarks")
+        self._bookmarks_changed()
         self.t0 = first.meta.get("timestamp")
         self.view.set_ground(estimate_ground(first))
         modes = color_modes(first)
@@ -408,7 +524,9 @@ class MainWindow(QtWidgets.QMainWindow):
         echoes = np.unique(first.echo).tolist() if "echo" in first.fields else []
         d.hidden_echoes &= set(echoes)
         self.properties.set_run(modes, echoes, rec.info.get("echoes", {}))
+        self.inspector.set_fields(modes)
         self.player_bar.set_count(len(rec), rec.rate_hz)
+        self.player_bar.seekbar.set_marks(self.bookmarks.frames())
         self.runs_panel.set_current(path)
         self._remember(path)
         self.shell.push(rec=rec)
@@ -539,12 +657,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shell.push(frame=raw)
         self.fps.tick()
         self._report_errors()
+        self._measure_frame()
         now = time.perf_counter()
         if not self.player.playing or now - self._last_info > 0.25:
             self._last_info = now
             self.info.show_frame(self)
+            self.inspector.refresh()
             self.pipeline_panel.update_stats()
             self.status_points.setText(f"{len(self.shown):,} points")
+
+    def _measure_frame(self) -> None:
+        """Metrics of the frame on screen: the strip fills in while playing."""
+        if self.metrics is None or self.raw is None:
+            return
+        i = self.raw.meta.get("frame", self.index)
+        select = self.selection.mask if self.selection is not None else None
+        noise = self.rec.info.get("noise_labels", []) if self.rec is not None else []
+        self.metrics.put(i, frame_metrics(self.raw, self.output, noise, select))
+        self.metrics_strip.set_index(i)
 
     def _visible(self, frame: Frame | None) -> Frame | None:
         """``frame`` without the echoes hidden under Properties."""
@@ -597,7 +727,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.view.set_layer(REMOVED, None)
         for layer in self.layers.values():
             self._draw_layer(layer)
+        self._draw_selection()
         self.view.render()
+
+    def _draw_selection(self) -> None:
+        """The box selection on the shown frame: the same sensor-fixed region every frame."""
+        if self.selection is None or self.shown is None:
+            self.selected = None
+            self.view.set_layer(SELECTION, None)
+            return
+        self.selected = self.shown[self.selection.mask(self.shown.xyz)]
+        self.view.set_layer(SELECTION, self.selected.xyz, SELECTION_COLOR,
+                            self.display.point_size + 1.5)
 
     def _draw_layer(self, layer: Layer) -> None:
         xyz = None
@@ -681,6 +822,192 @@ class MainWindow(QtWidgets.QMainWindow):
     def toggle_split(self, on: bool | None = None) -> None:
         self.display.split = (not self.display.split) if on is None else bool(on)
         self.apply_display()
+
+    # analysis tools: pick, measure, box selection
+
+    TOOL_HINTS = {"navigate": "", "pick": "Pick: click a point (Esc clears)",
+                  "measure": "Measure: click two points (Esc clears)",
+                  "select": "Select: drag a box; a click clears it (Esc clears)"}
+
+    def set_tool(self, tool: str) -> None:
+        self.view.set_tool(tool)
+        self.act[f"tool_{tool}"].setChecked(True)
+        if self.TOOL_HINTS[tool]:
+            self.statusBar().showMessage(self.TOOL_HINTS[tool], 6000)
+
+    def clear_tools(self) -> None:
+        """Forget the picked point, the measurement and the selection."""
+        self.picked, self.measurement, self.measure_points = None, None, []
+        changed = self.selection is not None
+        self.selection = self.selected = None
+        for name in (PICKED, MEASURED, SELECTION):
+            self.view.set_layer(name, None)
+        self.view.set_measurement()
+        self.view.render()
+        if changed and self.metrics is not None:
+            self.metrics.clear(["selected"])
+        if self.raw is not None:
+            self.info.show_frame(self)
+            self.inspector.refresh()
+
+    def _frame_in(self, renderer) -> Frame | None:
+        """What a renderer shows: the raw half in split view, else the pipeline's output."""
+        if renderer is not None and renderer is self.view.raw_renderer:
+            return self._visible(self.raw)
+        return self.shown
+
+    def _point_clicked(self, renderer, x: float, y: float) -> None:
+        frame = self._frame_in(renderer)
+        if frame is None:
+            return
+        i = screen_view(renderer).pick(frame.xyz, x, y)
+        if i is None:
+            self.statusBar().showMessage("No point under the mouse", 3000)
+            return
+        point = describe_point(frame, i)
+        xyz = np.array([point["x"], point["y"], point["z"]], np.float32)
+        if self.view.tool == "pick":
+            point["frame"] = self.index
+            point["view"] = "raw" if renderer is self.view.raw_renderer else "output"
+            self.picked = point
+            self.view.set_layer(PICKED, xyz[None], PICK_COLOR, 11)
+            text = ", ".join(f"{k} {v:.4g}" if isinstance(v, float) else f"{k} {v}"
+                             for k, v in point.items() if k not in ("x", "y", "z", "view"))
+            self.statusBar().showMessage(f"Picked ({point['x']:.2f}, {point['y']:.2f}, "
+                                         f"{point['z']:.2f}): {text}", 10000)
+        else:  # measure
+            if len(self.measure_points) == 2:
+                self.measure_points = []
+            self.measure_points.append(xyz)
+            self.view.set_layer(MEASURED, np.array(self.measure_points), "#ffd54f", 10)
+            if len(self.measure_points) == 2:
+                a, b = (p.astype(np.float64) for p in self.measure_points)
+                d = b - a
+                self.measurement = {"a": a, "b": b, "distance": float(np.linalg.norm(d)),
+                                    "horizontal": float(np.hypot(d[0], d[1])),
+                                    "dz": float(d[2])}
+                m = self.measurement
+                self.view.set_measurement(a, b, f"{m['distance']:.2f} m")
+                self.statusBar().showMessage(
+                    f"Distance {m['distance']:.3f} m (horizontal {m['horizontal']:.3f} m, "
+                    f"Δz {m['dz']:+.3f} m)", 10000)
+            else:
+                self.measurement = None
+                self.view.set_measurement()
+        self.view.render()
+        self.info.show_frame(self)
+
+    def _box_drawn(self, renderer, rect) -> None:
+        self.selection = None if rect is None else BoxSelection(screen_view(renderer), rect)
+        self._draw_selection()
+        self.view.render()
+        if self.metrics is not None:
+            self.metrics.clear(["selected"])
+            self._measure_frame()
+        self.info.show_frame(self)
+        self.inspector.refresh()
+        if self.selected is not None:
+            self.statusBar().showMessage(f"{len(self.selected):,} points selected; the box "
+                                         "stays fixed to the sensor on other frames", 6000)
+
+    # bookmarks
+
+    def add_bookmark(self, note: str | None = None, frame: int | None = None) -> None:
+        """Bookmark ``frame`` (default: the current one); without ``note``, ask for one."""
+        if self.bookmarks is None:
+            return
+        frame = self.index if frame is None else int(frame)
+        if note is None:
+            note, ok = QtWidgets.QInputDialog.getText(
+                self, "Bookmark", f"Note for frame {frame}:", text=self.bookmarks.note(frame))
+            if not ok:
+                return
+        self.bookmarks.add(frame, note)
+        self.save_bookmarks()
+
+    def jump_bookmark(self, direction: int) -> None:
+        if self.bookmarks is None:
+            return
+        target = (self.bookmarks.next(self.index) if direction > 0
+                  else self.bookmarks.previous(self.index))
+        if target is None:
+            self.statusBar().showMessage("No more bookmarks in that direction", 3000)
+            return
+        self.player.pause()
+        self.show_frame(target, wait=True)
+        self.statusBar().showMessage(f"Frame {target}: {self.bookmarks.note(target)}", 6000)
+
+    def save_bookmarks(self) -> None:
+        try:
+            path = self.bookmarks.save()
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, "Bookmarks", f"Could not save bookmarks:\n\n{e}")
+            return
+        self._bookmarks_changed()
+        self.statusBar().showMessage(f"Bookmarks saved to {path}", 4000)
+
+    def _bookmarks_changed(self) -> None:
+        frames = self.bookmarks.frames() if self.bookmarks is not None else []
+        self.bookmarks_panel.set_bookmarks(self.bookmarks)
+        self.player_bar.seekbar.set_marks(frames)
+        self.metrics_strip.set_marks(frames)
+
+    # run metrics
+
+    def compute_metrics(self) -> None:
+        """Measure every frame in the background; the metric strip fills in."""
+        if self.rec is None or self.metrics is None:
+            return
+        self._stop_metrics_job()
+        select = self.selection.mask if self.selection is not None else None
+        job = MetricsJob(self.rec, self.pipeline.snapshot(), self.metrics,
+                         self.rec.info.get("noise_labels", []), select, parent=self)
+        job.progress.connect(lambda done, total: self.metrics_strip.status.setText(
+            f"{done}/{total}"))
+        job.finished.connect(lambda done: self.metrics_strip.status.setText(f"{done} frames"))
+        self.metrics_job = job
+        job.start()
+
+    def _stop_metrics_job(self) -> None:
+        if self.metrics_job is not None and not self.metrics_job.done:
+            self.metrics_job.cancel()
+            self.metrics_job.wait(30)
+        self.metrics_job = None
+
+    def _toggle_metrics_strip(self, on: bool) -> None:
+        self.metrics_strip.setVisible(on)
+        self.settings.setValue("metricStrip", on)
+
+    # workspaces
+
+    def save_workspace_dialog(self) -> None:
+        if self.rec is None:
+            return
+        start = self.settings.value("workspaceDir") or str(scripts_dir())
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save workspace", str(Path(start) / f"{self.rec.name}{workspace.SUFFIX}"),
+            f"LidarLab workspace (*{workspace.SUFFIX})")
+        if path:
+            saved = workspace.save(self, path)
+            self.settings.setValue("workspaceDir", str(saved.parent))
+            self.statusBar().showMessage(f"Workspace saved to {saved}", 5000)
+
+    def open_workspace_dialog(self) -> None:
+        start = self.settings.value("workspaceDir") or str(scripts_dir())
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open workspace", start, f"LidarLab workspace (*{workspace.SUFFIX})")
+        if path:
+            self.open_workspace(path)
+
+    def open_workspace(self, path) -> bool:
+        try:
+            workspace.load(self, path)
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            QtWidgets.QMessageBox.warning(self, "Open workspace", f"{path}:\n\n{e}")
+            return False
+        self.settings.setValue("workspaceDir", str(Path(path).parent))
+        self.statusBar().showMessage(f"Workspace {Path(path).name} restored", 5000)
+        return True
 
     # filters and presets
 
@@ -771,6 +1098,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _pipeline_changed(self) -> None:
         self.processor.invalidate()
+        if self.metrics is not None:  # what depends on the steps is measured again
+            self._stop_metrics_job()
+            self.metrics.clear(PIPELINE_METRICS)
+            self.metrics_strip.status.setText("")
         self.pipeline_panel.rebuild()
         self.properties.step_editor.sync()
         if self._live and self.pipeline.active and self.raw is not None:
@@ -803,6 +1134,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.pipeline.active:
                 mask[[i for i in self.processor.cached() if i < len(rec)]] = True
             self.player_bar.seekbar.set_processed(mask)
+        if self.metrics is not None and self.metrics.version != self._metrics_version:
+            self._metrics_version = self.metrics.version
+            self.metrics_strip.update()
         self.status_fps.setText(f"{self.fps.value:4.1f} fps" if self.player.playing else "paused")
 
     def eventFilter(self, obj, event) -> bool:
@@ -824,6 +1158,7 @@ class MainWindow(QtWidgets.QMainWindow):
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         key, k = event.key(), Qt.Key
         cameras = {k.Key_1: "3d", k.Key_2: "bev", k.Key_3: "front", k.Key_4: "side", k.Key_R: "fit"}
+        tools = {k.Key_N: "navigate", k.Key_P: "pick", k.Key_M: "measure", k.Key_S: "select"}
         if key == k.Key_Space:
             self.player.toggle()
         elif key in (k.Key_Right, k.Key_Left):
@@ -834,6 +1169,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_frame(len(self.rec) - 1)
         elif key in cameras:
             self.set_camera(cameras[key])
+        elif key in tools:
+            self.set_tool(tools[key])
+        elif key == k.Key_Escape:
+            self.clear_tools()
+            self.set_tool("navigate")
+        elif key == k.Key_B:
+            self.add_bookmark()
+        elif key in (k.Key_BracketLeft, k.Key_BracketRight):
+            self.jump_bookmark(1 if key == k.Key_BracketRight else -1)
         elif key == k.Key_C:
             self._cycle_color()
         elif key in (k.Key_Plus, k.Key_Equal, k.Key_Minus):
@@ -866,11 +1210,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.pause()
         self._poll.stop()
         self.settings.setValue("window/geometry", self.saveGeometry())
-        self.settings.setValue("window/state", self.saveState())
+        self.settings.setValue(LAYOUT_KEY, self.saveState())
         self.editor.save_session(self.settings)
         QtWidgets.QApplication.instance().removeEventFilter(self)
         sys.excepthook = self._excepthook
         self.pipeline.unsubscribe(self._pipeline_changed)
+        self._stop_metrics_job()
         # threads finishing a frame after this must not signal the deleted window
         self.processor.on_done = None
         self.processor.close()

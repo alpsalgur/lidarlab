@@ -129,6 +129,19 @@ _ICONS = {
             '<circle cx="15.5" cy="12" r="2.3" fill="{c}"/>',
     "folder": '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1'
               '-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" fill="none" stroke="{c}" stroke-width="1.6"/>',
+    "navigate": '<path d="M12 3l3 4h-2v4h4V9l4 3-4 3v-2h-4v4h2l-3 4-3-4h2v-4H7v2l-4-3 4-3v2h4V7H9z"'
+                ' fill="{c}"/>',
+    "pick": '<circle cx="12" cy="12" r="6.5" fill="none" stroke="{c}" stroke-width="1.6"/>'
+            '<path d="M12 2v5M12 17v5M2 12h5M17 12h5" stroke="{c}" stroke-width="1.6"/>'
+            '<circle cx="12" cy="12" r="1.8" fill="{c}"/>',
+    "measure": '<path d="M3 16.5 16.5 3 21 7.5 7.5 21z" fill="none" stroke="{c}"'
+               ' stroke-width="1.6"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2" stroke="{c}"'
+               ' stroke-width="1.6"/>',
+    "select": '<rect x="4" y="4" width="16" height="16" fill="none" stroke="{c}"'
+              ' stroke-width="1.6" stroke-dasharray="3 2"/><circle cx="9" cy="10" r="1.3"'
+              ' fill="{c}"/><circle cx="14" cy="14" r="1.3" fill="{c}"/>'
+              '<circle cx="15" cy="9" r="1.3" fill="{c}"/>',
+    "bookmark": '<path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1z" fill="#ffd54f"/>',
     "split": '<rect x="3" y="5" width="18" height="14" rx="1.5" fill="none" stroke="{c}"'
              ' stroke-width="1.6"/><path d="M12 5v14" stroke="{c}" stroke-width="1.6"/>'
              '<circle cx="7.5" cy="12" r="1.3" fill="{c}"/><circle cx="16.5" cy="12" r="1.3"'
