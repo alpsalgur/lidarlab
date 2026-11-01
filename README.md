@@ -21,11 +21,35 @@ noise reduction, your own processing steps.
   notes, and workspaces to come back to an analysis
 - Pipeline presets in YAML, converters for KITTI, Boreas (snow) and WADS (labeled snow), and a
   synthetic multi-echo recording with rain, spray and per-point ground truth
+- A Windows installer: the application runs without a Python installation, and the command
+  line comes with it as `lidarlab-cli.exe`
 
 Built with Python 3.11+, PySide6 (Qt 6), VTK (through PyVista), IPython/qtconsole, NumPy and
 SciPy.
 
 ## Installation
+
+### Windows installer
+
+Download `LidarLab-1.0.0-Setup.exe` from the
+[releases](https://github.com/alpsalgur/lidarlab/releases) (or build it, see
+[Windows release](#windows-release)) and run it. It installs LidarLab for the current user
+without administrator rights (the setup also offers an installation for all users) into
+`%LOCALAPPDATA%\Programs\LidarLab`, adds a Start menu entry and optionally a desktop shortcut,
+and opens `.lidarlab` workspaces with LidarLab. The installer is not code-signed, so Windows
+SmartScreen may hold it back: More info → Run anyway.
+
+On the first start LidarLab offers to open a test run or to create a sample one: a synthetic
+city street with three echoes and rain and spray from the middle on (100 frames, about
+0.5 GB). File → Create Sample Test Run makes another one later. The installed application
+keeps test runs, scripts and exports in `Documents\LidarLab` (`data`, `scripts`) and its logs
+in `%LOCALAPPDATA%\LidarLab`.
+
+The first start after installing can take up to a minute while Windows Defender scans the new
+files; later starts take a few seconds. Uninstalling (Settings → Apps → LidarLab) removes the
+program with its settings, logs and caches; `Documents\LidarLab` stays.
+
+### From source
 
 ```powershell
 python -m venv venv
@@ -34,6 +58,9 @@ venv\Scripts\python tools\smoke_test.py      # checks that Qt, VTK and the shell
 ```
 
 ## Running
+
+The installed application starts from the Start menu, or with a test run or a workspace:
+`LidarLab.exe D:\runs\run_042`. From source:
 
 ```powershell
 .\LidarLab.bat                                    # or double-click it in Explorer (no console)
@@ -99,12 +126,19 @@ range and writes them to a new folder, in the background with a progress window;
 meanwhile do not change the export. The same from a terminal, with a preset:
 
 ```powershell
-venv\Scripts\lidarlab run data\synthetic\city_rain data\exports\clean -p rain_denoise.yaml
+venv\Scripts\lidarlab run data\synthetic\city_rain data\exports\clean -p rain_denoise
 venv\Scripts\lidarlab run data\kitti\2011_09_26_drive_0011 data\exports\kitti_ply --format ply
 venv\Scripts\lidarlab run data\boreas\boreas-2021-01-26-11-22_3300 data\exports\snow_pcd --frames 50:150 --format pcd
 ```
 
-Options: `--frames A:B` (A included, B not), `--format npz|ply|pcd`, `--workers N`,
+The installed application has the same command as `lidarlab-cli.exe` in its folder:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\LidarLab\lidarlab-cli.exe" run D:\runs\run_042 D:\exports\run_042_clean -p rain_denoise
+```
+
+Options: `-p PRESET` (a `.yaml` file, or the name of a built-in preset such as
+`rain_denoise`), `--frames A:B` (A included, B not), `--format npz|ply|pcd`, `--workers N`,
 `--processes`, `--no-compress`, `--overwrite`. The exit code is 0 when every frame was written.
 
 The output folder is a test run again: one file per source frame under the same name, npz in
@@ -153,6 +187,9 @@ ROR, export, a filter of your own with sliders, scoring the pipeline against lab
 script, Ctrl+Enter the selection or line. With "Run on external save" on, saving a script that
 is open in the editor from another editor (e.g. VS Code) reloads and runs it; steps are replaced
 by name, and values tuned in the app are kept unless the default changed.
+
+In the installed application, scripts can import the packages LidarLab is built on (NumPy,
+SciPy, PyYAML, …); for other packages, install LidarLab from source.
 
 Without the GUI:
 
@@ -215,3 +252,21 @@ venv\Scripts\python -m ruff check .
 # keyboard alone meanwhile) and writes screenshots to data\previews
 venv\Scripts\python tools\ui_selftest.py data\synthetic\city_rain data\kitti\2011_09_26_drive_0011
 ```
+
+### Windows release
+
+```powershell
+venv\Scripts\python -m pip install -e ".[dev,build]"   # adds PyInstaller
+winget install JRSoftware.InnoSetup                     # for the installer
+venv\Scripts\python tools\build_release.py
+```
+
+`tools/build_release.py` makes the icon and the version resource, builds `dist\LidarLab\` with
+PyInstaller (`packaging/lidarlab.spec`: `LidarLab.exe` without a console and `lidarlab-cli.exe`,
+sharing one set of libraries), checks the build and compiles `dist\LidarLab-<version>-Setup.exe`
+with Inno Setup (`packaging/installer.iss`). The checks start `LidarLab.exe --self-check`, which
+creates a small test run the way File → Create Sample Test Run does, opens it and uses the
+shell, completion, a filter, the 3D view and export (report in `build\selfcheck.json`), and
+export a test run with `lidarlab-cli.exe`, with threads and with processes. When a check fails, no installer is made.
+A clean build takes about 6 minutes. `--no-installer` stops after the checks, `--skip-build` checks an existing `dist\LidarLab`. The
+version comes from `src/lidarlab/__init__.py`.
