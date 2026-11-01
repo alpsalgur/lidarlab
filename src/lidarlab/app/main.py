@@ -54,16 +54,25 @@ def _vtk_messages_to_file() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="lidarlab", description="LiDAR test run viewer with an integrated Python IDE.")
-    parser.add_argument("run", nargs="?", help="test run folder (.npz frames) to open")
+    parser.add_argument("run", nargs="?",
+                        help="test run folder (.npz frames) or workspace (.lidarlab) to open")
     parser.add_argument("--reset-layout", action="store_true",
                         help="start with the default window layout")
+    parser.add_argument("--self-check", metavar="REPORT", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     _log_without_console()
+    if args.self_check:
+        from .selfcheck import run_self_check
+
+        return run_self_check(args.self_check)
     app = make_app()
     from .main_window import MainWindow
+    from .workspace import SUFFIX
 
     _vtk_messages_to_file()
-    window = MainWindow(run=args.run, restore_layout=not args.reset_layout)
+    workspace = args.run if args.run and args.run.lower().endswith(SUFFIX) else None
+    window = MainWindow(run=None if workspace else args.run,
+                        restore_layout=not args.reset_layout, workspace=workspace)
     window.show()
     return app.exec()
 
