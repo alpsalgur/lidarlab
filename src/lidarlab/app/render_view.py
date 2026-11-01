@@ -21,6 +21,7 @@ from vtkmodules.vtkRenderingCore import (
     vtkPolyDataMapper2D,
     vtkRenderer,
     vtkTextActor,
+    vtkWindowToImageFilter,
 )
 
 ECHO_COLORS = ("#ff9f1c", "#d9d9d9", "#4dabf7", "#69db7c", "#da77f2", "#ffd43b")
@@ -563,14 +564,38 @@ class RenderView(QtWidgets.QWidget):
 
     # output
 
+    def capture(self) -> np.ndarray:
+        """The rendered 3D view as an (H, W, 3) uint8 array.
+
+        Reads the render window with VTK directly: pyvista's screenshot refuses when the
+        window's OpenGL context is not the current one, which happens in the packaged app."""
+        window = self.plotter.render_window
+        if min(window.GetSize()) <= 0:  # reading a window that is not laid out yet crashes VTK
+            raise RuntimeError("the 3D view is not on screen yet")
+        window.MakeCurrent()
+        self.plotter.render()
+        grabber = vtkWindowToImageFilter()
+        grabber.SetInput(window)
+        grabber.SetInputBufferTypeToRGB()
+        grabber.ReadFrontBufferOff()
+        grabber.Update()
+        image = grabber.GetOutput()
+        width, height, _ = image.GetDimensions()
+        scalars = image.GetPointData().GetScalars()
+        if scalars is None or width < 1 or height < 1:
+            raise RuntimeError(f"the 3D view gave no image (render window {window.GetSize()}, "
+                               f"mapped={window.GetMapped()})")
+        pixels = numpy_support.vtk_to_numpy(scalars)
+        return np.ascontiguousarray(pixels.reshape(height, width, 3)[::-1])  # VTK rows go up
+
     def grab_image(self) -> QtGui.QImage:
         """The rendered 3D image (QWidget.grab cannot see the OpenGL surface)."""
-        img = np.ascontiguousarray(self.plotter.screenshot(return_img=True)[..., :3])
+        img = self.capture()
         h, w, _ = img.shape
         return QtGui.QImage(img.data, w, h, 3 * w, QtGui.QImage.Format.Format_RGB888).copy()
 
     def save_screenshot(self, path) -> None:
-        self.plotter.screenshot(str(path))
+        self.grab_image().save(str(path))
 
     def close(self) -> None:
         self.plotter.close()

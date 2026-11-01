@@ -320,7 +320,7 @@ class ViewAPI:
     def screenshot(self, path=None):
         """Save the 3D view as PNG (returns the path) or, without a path, return it as an array."""
         if path is None:
-            return self._w.view.plotter.screenshot(return_img=True)
+            return self._w.view.capture()
         self._w.view.save_screenshot(Path(path))
         return Path(path)
 
