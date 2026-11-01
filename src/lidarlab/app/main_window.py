@@ -35,13 +35,14 @@ from .export_dialog import ExportDialog, ExportJob
 from .info_panel import InfoPanel
 from .inspector import InspectorPanel
 from .metrics_strip import MetricsJob, MetricsStrip
-from .paths import data_dir, examples_dir, log_dir, scripts_dir
+from .paths import data_dir, examples_dir, frozen, log_dir, project_dir, scripts_dir
 from .picking import BoxSelection, describe_point, screen_view
 from .pipeline_panel import PipelinePanel
 from .player import Layer, Player, Rate
 from .properties_panel import PropertiesPanel
 from .render_view import LABEL_COLORS, RenderView, category_color, category_lut, colormap_lut
 from .runs_panel import RunsPanel
+from .sample_run import SampleJob, free_folder
 from .step_editor import filter_menu, preset_dialog
 from .timeline import SPEEDS, PlayerBar
 
@@ -82,7 +83,8 @@ class MainWindow(QtWidgets.QMainWindow):
     frameLoaded = QtCore.Signal(int)  # emitted by loader threads, handled in the GUI thread
     frameProcessed = QtCore.Signal(int)  # emitted by processing threads
 
-    def __init__(self, run: str | None = None, restore_layout: bool = True):
+    def __init__(self, run: str | None = None, restore_layout: bool = True,
+                 workspace: str | None = None):
         super().__init__()
         self.setWindowTitle("LidarLab")
         self.setWindowIcon(theme.app_icon())
@@ -119,6 +121,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bookmarks: Bookmarks | None = None
         self.metrics: MetricStore | None = None
         self.metrics_job: MetricsJob | None = None
+        self.sample_job: SampleJob | None = None
 
         self.view = RenderView(self)
         self.player = Player(self)
@@ -175,9 +178,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restore(restore_layout)
         self.apply_display()
         self.pipeline_panel.rebuild()
+        if workspace:
+            QtCore.QTimer.singleShot(0, lambda: self.open_workspace(workspace))
+            return
         start = run or self.settings.value("lastRun")
         if start and Path(start).is_dir():
             QtCore.QTimer.singleShot(0, lambda: self.open_run(start))
+        elif frozen() and not self.settings.value("welcomed"):
+            QtCore.QTimer.singleShot(300, self._welcome)  # first start of the installed app
 
     # construction
 
@@ -237,6 +245,8 @@ class MainWindow(QtWidgets.QMainWindow):
                             checkable=True),
             "load_preset": action("&Load Pipeline Preset…", self.load_preset, icon="open"),
             "save_preset": action("&Save Pipeline Preset…", self.save_preset, icon="save"),
+            "sample_run": action("Create &Sample Test Run…", self.create_sample_run,
+                                 tip="Generate a synthetic multi-echo recording with rain"),
             "open_workspace": action("Open &Workspace…", self.open_workspace_dialog),
             "save_workspace": action("Save Wor&kspace…", self.save_workspace_dialog),
             "bookmark": action("Bookmark Frame…\tB", lambda: self.add_bookmark(),
@@ -344,6 +354,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file.addAction(a["open"])
         self.recent_menu = file.addMenu("Recent Test Runs")
         file.addAction(a["add_root"])
+        file.addAction(a["sample_run"])
         file.addSeparator()
         file.addAction(a["export"])
         file.addAction(a["export_run"])
@@ -977,6 +988,56 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_metrics_strip(self, on: bool) -> None:
         self.metrics_strip.setVisible(on)
         self.settings.setValue("metricStrip", on)
+
+    # sample data and first start
+
+    def create_sample_run(self) -> None:
+        """Generate a 100-frame synthetic run under the data folder and open it."""
+        if self.sample_job is not None and not self.sample_job.done:
+            return
+        out = free_folder(data_dir() / "samples", "city_rain")
+        job = SampleJob(out, frames=100, parent=self)
+        progress = QtWidgets.QProgressDialog("Creating a sample test run (rain, spray, three "
+                                             "echoes)…", None, 0, 100, self)
+        progress.setWindowTitle("Sample test run")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        def show(done: int, total: int) -> None:
+            progress.setMaximum(total)
+            progress.setValue(done)
+
+        def finished(result) -> None:
+            progress.close()
+            if isinstance(result, Exception):
+                QtWidgets.QMessageBox.warning(self, "Sample test run", str(result))
+                return
+            self.runs_panel.scan()
+            self.open_run(str(result))
+
+        job.progress.connect(show)
+        job.finished.connect(finished)
+        self.sample_job = job
+        job.start()
+
+    def _welcome(self) -> None:
+        self.settings.setValue("welcomed", True)
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Welcome to LidarLab")
+        box.setText("<b>Welcome to LidarLab</b>")
+        box.setInformativeText(
+            "Open a test run: a folder with one .npz file per frame. Your test runs, scripts "
+            f"and exports go to {project_dir()} by default.\n\nNo data at hand? Create a "
+            "sample test run: a synthetic multi-echo recording with rain and spray.")
+        role = QtWidgets.QMessageBox.ButtonRole
+        sample = box.addButton("Create Sample Test Run", role.AcceptRole)
+        open_run = box.addButton("Open Test Run…", role.ActionRole)
+        box.addButton(QtWidgets.QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is sample:
+            self.create_sample_run()
+        elif box.clickedButton() is open_run:
+            self.open_run_dialog()
 
     # workspaces
 
