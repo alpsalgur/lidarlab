@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lidarlab"
-version = "0.1.0"
+dynamic = ["version"]
 description = "LiDAR recording viewer with an integrated Python console"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,9 +25,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+build = ["pyinstaller>=6.11"]
 
 [project.scripts]
 lidarlab = "lidarlab.cli:main"
+
+[tool.hatch.version]
+path = "src/lidarlab/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lidarlab"]

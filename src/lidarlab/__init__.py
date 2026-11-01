@@ -23,7 +23,7 @@ from .core.pipeline import Pipeline, Processed, Step, StepError, pipeline, step
 from .core.processing import Processor
 from .core.recording import Recording
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "ExportReport",
