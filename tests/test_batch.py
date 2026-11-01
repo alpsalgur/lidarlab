@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pytest
+import yaml
 
 import lidarlab as lab
 from lidarlab import Pipeline
@@ -114,3 +115,8 @@ def test_command_line(run, tmp_path, capsys):
     assert "2/2 frames written" in capsys.readouterr().out
     assert batch.main([str(run), str(tmp_path / "out")]) == 2  # not empty
     assert "not empty" in capsys.readouterr().err
+    # a built-in preset by name, from any folder
+    code = batch.main([str(run), str(tmp_path / "rain"), "-p", "rain_denoise", "--frames", "0:1"])
+    assert code == 0
+    steps = yaml.safe_load((tmp_path / "rain" / "pipeline.yaml").read_text())["steps"]
+    assert [s["name"] for s in steps] == ["echo", "weak_first_echo", "dror"]

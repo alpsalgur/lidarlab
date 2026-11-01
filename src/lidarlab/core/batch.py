@@ -302,6 +302,20 @@ def _progress_line(start: float) -> Progress:
     return show
 
 
+PRESETS = Path(__file__).resolve().parents[1] / "examples" / "presets"
+
+
+def _preset(value: str) -> Path:
+    """A preset file, or the name of a built-in preset (``rain_denoise``): the installed
+    application keeps those in its own folder."""
+    path = Path(value)
+    if not path.is_file():
+        for builtin in (PRESETS / path.name, PRESETS / f"{path.name}.yaml"):
+            if builtin.is_file():
+                return builtin
+    return path
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     """``lidarlab run``: the same processing as the app's Export, without a window."""
     ap = argparse.ArgumentParser(
@@ -309,8 +323,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         description="Run a pipeline preset over a test run and write the processed frames.")
     ap.add_argument("source", type=Path, help="test run folder (.npz frames)")
     ap.add_argument("out", type=Path, help="output folder (becomes a test run)")
-    ap.add_argument("-p", "--pipeline", type=Path,
-                    help="preset (.yaml); without it the frames are only copied or converted")
+    ap.add_argument("-p", "--pipeline", type=_preset,
+                    help="preset (.yaml) or a built-in preset's name (rain_denoise); without "
+                         "it the frames are only copied or converted")
     ap.add_argument("--frames", help="A:B, first included, last not (e.g. 100:300 or 400:)")
     ap.add_argument("--format", choices=list(FORMATS), default="npz")
     ap.add_argument("--workers", type=int, default=default_workers(),
